@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use bootproof_sdk::VerifiableSignedAttestationFormat;
 use bootproof_sdk::format::nitro::{Nitro, NitroPcrs};
+use bootproof_sdk::VerifiableSignedAttestationFormat;
 use sha2::{Digest, Sha256};
 
 /// Stable, machine-readable probe outcome reasons (spec §10).
@@ -222,6 +222,72 @@ pub fn verify_evidence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+
+    const VALID_TIME: Duration = Duration::from_secs(1_766_510_416);
+    const PCR_0_AND_1: &str = "ef093e4c1fd13878956589833c0e396b935cdf5ae45c1cc595e1a19a6da5812850f0ef3e77df918cb2a86d88ddf9cc03";
+    const PCR_2: &str = "21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a";
+    const NONCE: &str = "d041b23bce8678bbc7c174bd8494c4f9759386eec963ec69bfd45c1452b10636";
+
+    fn valid_fixture() -> Vec<u8> {
+        STANDARD
+            .decode(include_str!("../tests/data/aws-test.cbor.b64").trim())
+            .unwrap()
+    }
+
+    fn valid_pcrs() -> NitroPcrs {
+        pcrs_from_hex(PCR_0_AND_1, PCR_0_AND_1, PCR_2).unwrap()
+    }
+
+    fn valid_nonce() -> Vec<u8> {
+        hex::decode(NONCE).unwrap()
+    }
+
+    #[test]
+    fn valid_bootproof_fixture_passes() {
+        let document = valid_fixture();
+        let outcome = verify_evidence(&document, &valid_pcrs(), &valid_nonce(), VALID_TIME);
+
+        assert!(outcome.passed);
+        assert_eq!(outcome.reason, ProbeReason::AllChecksPassed);
+        assert_eq!(
+            outcome.evidence_digest,
+            "sha256:6afe913ae239fc83c44fd21c367f6ca9bf1b1b31d737c4720fd42cd49deb2c47"
+        );
+    }
+
+    #[test]
+    fn replayed_evidence_with_wrong_nonce_fails() {
+        let document = valid_fixture();
+        let wrong_nonce = [0x10; 32];
+        let outcome = verify_evidence(&document, &valid_pcrs(), &wrong_nonce, VALID_TIME);
+
+        assert!(!outcome.passed);
+        assert_eq!(outcome.reason, ProbeReason::NonceMismatch);
+    }
+
+    #[test]
+    fn valid_evidence_with_wrong_pcr_fails() {
+        let document = valid_fixture();
+        let mut pcrs = valid_pcrs();
+        pcrs.get_mut(&0).unwrap()[1] ^= 0xff;
+        let outcome = verify_evidence(&document, &pcrs, &valid_nonce(), VALID_TIME);
+
+        assert!(!outcome.passed);
+        assert_eq!(outcome.reason, ProbeReason::PcrMismatch);
+    }
+
+    #[test]
+    fn tampered_evidence_signature_fails() {
+        let mut document = valid_fixture();
+        let last = document.last_mut().unwrap();
+        *last ^= 0xff;
+        let outcome = verify_evidence(&document, &valid_pcrs(), &valid_nonce(), VALID_TIME);
+
+        assert!(!outcome.passed);
+        assert_eq!(outcome.reason, ProbeReason::InvalidSignature);
+    }
 
     #[test]
     fn pcrs_from_hex_happy_path() {

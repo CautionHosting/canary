@@ -8,6 +8,8 @@ use canary_core::canonical::digest_canonical;
 use canary_core::config::{Config, ExpectedPcrs, Target};
 use serde::Deserialize;
 
+use crate::atomic_file;
+
 /// The `.caution/trusted_hashes.json` shape produced by `caution verify
 /// --save-pcrs` (spec §15 step 1). Extra fields such as `verified_at` are
 /// allowed and ignored.
@@ -22,8 +24,7 @@ impl TrustedHashesFile {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading PCRs file {}", path.display()))?;
-        serde_json::from_str(&text)
-            .with_context(|| format!("parsing PCRs file {}", path.display()))
+        serde_json::from_str(&text).with_context(|| format!("parsing PCRs file {}", path.display()))
     }
 
     pub fn into_expected_pcrs(self) -> ExpectedPcrs {
@@ -46,9 +47,8 @@ pub fn load_or_create_config(path: &Path, node_id: Option<&str>) -> Result<Confi
             .with_context(|| format!("parsing config {}", path.display()))?;
         Ok(config)
     } else {
-        let node_id = node_id.context(
-            "config file does not exist yet; --node-id is required to create a new one",
-        )?;
+        let node_id = node_id
+            .context("config file does not exist yet; --node-id is required to create a new one")?;
         Ok(Config {
             version: 0,
             node_id: node_id.to_string(),
@@ -81,12 +81,13 @@ pub fn validate_and_write(path: &Path, config: &Config) -> Result<String> {
         .validate()
         .with_context(|| "config failed validation; not writing")?;
 
+    let digest = digest_canonical(config).context("computing config_digest")?;
     let pretty =
-        serde_json::to_string_pretty(config).context("serializing config to pretty JSON")?;
-    std::fs::write(path, pretty + "\n")
+        serde_json::to_string_pretty(config).context("serializing config to pretty JSON")? + "\n";
+    atomic_file::write(path, pretty.as_bytes(), 0o644)
         .with_context(|| format!("writing config {}", path.display()))?;
 
-    digest_canonical(config).context("computing config_digest")
+    Ok(digest)
 }
 
 #[cfg(test)]

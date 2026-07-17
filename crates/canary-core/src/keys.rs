@@ -19,11 +19,13 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use zeroize::Zeroize;
 
+use crate::config::is_valid_identifier;
+
 /// HKDF-Extract salt, fixed and versioned per spec §8.2.
 const HKDF_SALT: &[u8] = b"caution-canary-v0/root";
 
 /// `key_epoch` is pinned at 0 for V0; rotation is post-V0 (spec §8.2).
-const KEY_EPOCH: u32 = 0;
+pub const KEY_EPOCH: u32 = 0;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeyError {
@@ -32,6 +34,9 @@ pub enum KeyError {
 
     #[error("master seed must decode to exactly 32 bytes, got {0}")]
     InvalidSeedLength(usize),
+
+    #[error("invalid node identifier {0:?}")]
+    InvalidNodeId(String),
 
     #[error("hkdf expand failed: {0:?}")]
     Hkdf(hkdf::InvalidLength),
@@ -67,13 +72,15 @@ impl MasterSeed {
     /// Decode a base64-encoded 32-byte master seed. Accepts standard base64
     /// (with or without padding); the decoded length MUST be exactly 32 bytes.
     pub fn from_base64(s: &str) -> Result<Self, KeyError> {
-        let bytes = STANDARD
-            .decode(s)
-            .or_else(|_| STANDARD_NO_PAD.decode(s))?;
+        let mut bytes = STANDARD.decode(s).or_else(|_| STANDARD_NO_PAD.decode(s))?;
         let len = bytes.len();
-        let arr: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| KeyError::InvalidSeedLength(len))?;
+        if len != 32 {
+            bytes.zeroize();
+            return Err(KeyError::InvalidSeedLength(len));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        bytes.zeroize();
         Ok(Self(arr))
     }
 }
@@ -87,6 +94,7 @@ impl Drop for MasterSeed {
 /// One derived hybrid keypair (Ed25519 + ML-DSA-65) for a given `node_id` at
 /// `key_epoch = 0`, plus the signing methods over it.
 pub struct KeySet {
+    node_id: String,
     ed_signing_key: SigningKey,
     ml_private_key: ml_dsa_65::PrivateKey,
     ml_public_key: ml_dsa_65::PublicKey,
@@ -101,6 +109,9 @@ impl KeySet {
     /// ml_seed = HKDF-Expand(PRK, "signing/ml-dsa-65/<node_id>/key-epoch-0", 32)
     /// ```
     pub fn derive(seed: &MasterSeed, node_id: &str) -> Result<Self, KeyError> {
+        if !is_valid_identifier(node_id) {
+            return Err(KeyError::InvalidNodeId(node_id.to_string()));
+        }
         let (prk, hk) = Hkdf::<Sha256>::extract(Some(HKDF_SALT), &seed.0);
         let mut prk_bytes: [u8; 32] = prk.into();
 
@@ -122,6 +133,7 @@ impl KeySet {
         ml_seed.zeroize();
 
         Ok(Self {
+            node_id: node_id.to_string(),
             ed_signing_key,
             ml_private_key,
             ml_public_key,
@@ -138,11 +150,11 @@ impl KeySet {
     /// NOTE: uses `fips204`'s hedged (OS-RNG-randomized) `try_sign`, not
     /// deterministic signing. This is acceptable because verification is
     /// deterministic regardless of how the signature was produced.
-    pub fn sign_ml_dsa(&self, msg: &[u8]) -> Vec<u8> {
+    pub fn sign_ml_dsa(&self, msg: &[u8]) -> Result<Vec<u8>, KeyError> {
         self.ml_private_key
             .try_sign(msg, &[])
-            .expect("ml-dsa-65 signing failed")
-            .to_vec()
+            .map(|signature| signature.to_vec())
+            .map_err(|err| KeyError::MlDsa(err.to_string()))
     }
 
     pub fn ed25519_public_key_bytes(&self) -> [u8; 32] {
@@ -153,11 +165,15 @@ impl KeySet {
         self.ml_public_key.clone().into_bytes().to_vec()
     }
 
+    pub fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
     /// Build the `/keys.json` document (spec §8.3) for this keyset.
-    pub fn keys_document(&self, node_id: &str) -> KeysDocument {
+    pub fn keys_document(&self) -> KeysDocument {
         KeysDocument {
             protocol: "caution-canary-v0".to_string(),
-            node_id: node_id.to_string(),
+            node_id: self.node_id.clone(),
             key_epoch: KEY_EPOCH,
             keys: vec![
                 KeyEntry {
@@ -182,21 +198,20 @@ pub fn base64url_nopad(bytes: &[u8]) -> String {
 
 /// Verify an Ed25519 signature given only raw public-key bytes (offline verifier).
 pub fn verify_ed25519(pk_bytes: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), KeyError> {
-    let pk_arr: [u8; 32] =
-        pk_bytes
-            .try_into()
-            .map_err(|_| KeyError::InvalidPublicKeyLength {
-                alg: "Ed25519",
-                expected: 32,
-                actual: pk_bytes.len(),
-            })?;
-    let sig_arr: [u8; 64] =
-        sig.try_into()
-            .map_err(|_| KeyError::InvalidSignatureLength {
-                alg: "Ed25519",
-                expected: 64,
-                actual: sig.len(),
-            })?;
+    let pk_arr: [u8; 32] = pk_bytes
+        .try_into()
+        .map_err(|_| KeyError::InvalidPublicKeyLength {
+            alg: "Ed25519",
+            expected: 32,
+            actual: pk_bytes.len(),
+        })?;
+    let sig_arr: [u8; 64] = sig
+        .try_into()
+        .map_err(|_| KeyError::InvalidSignatureLength {
+            alg: "Ed25519",
+            expected: 64,
+            actual: sig.len(),
+        })?;
     let verifying_key = VerifyingKey::from_bytes(&pk_arr)?;
     let signature = EdSignature::from_bytes(&sig_arr);
     verifying_key.verify(msg, &signature)?;
@@ -233,6 +248,7 @@ pub fn verify_ml_dsa(pk_bytes: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), KeyE
 
 /// A single entry in the `/keys.json` `keys` array (spec §8.3).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct KeyEntry {
     pub alg: String,
     pub encoding: String,
@@ -241,6 +257,7 @@ pub struct KeyEntry {
 
 /// The `/keys.json` document (spec §8.3).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct KeysDocument {
     pub protocol: String,
     pub node_id: String,
@@ -267,10 +284,7 @@ mod tests {
             ks1.ed25519_public_key_bytes(),
             ks2.ed25519_public_key_bytes()
         );
-        assert_eq!(
-            ks1.ml_dsa_public_key_bytes(),
-            ks2.ml_dsa_public_key_bytes()
-        );
+        assert_eq!(ks1.ml_dsa_public_key_bytes(), ks2.ml_dsa_public_key_bytes());
     }
 
     #[test]
@@ -282,7 +296,10 @@ mod tests {
             ks_a.ed25519_public_key_bytes(),
             ks_b.ed25519_public_key_bytes()
         );
-        assert_ne!(ks_a.ml_dsa_public_key_bytes(), ks_b.ml_dsa_public_key_bytes());
+        assert_ne!(
+            ks_a.ml_dsa_public_key_bytes(),
+            ks_b.ml_dsa_public_key_bytes()
+        );
     }
 
     /// Known-answer test locking the derivation construction (spec §8.2)
@@ -296,10 +313,7 @@ mod tests {
         let ks = KeySet::derive(&seed, "caution-canary-demo").unwrap();
 
         let ed_pk_b64url = base64url_nopad(&ks.ed25519_public_key_bytes());
-        assert_eq!(
-            ed_pk_b64url,
-            "JqM4MS1_-36uIXsvgROUb2CFYlOQXnOgIvpnMW2bDBY"
-        );
+        assert_eq!(ed_pk_b64url, "JqM4MS1_-36uIXsvgROUb2CFYlOQXnOgIvpnMW2bDBY");
 
         let ml_pk_bytes = ks.ml_dsa_public_key_bytes();
         assert_eq!(ml_pk_bytes.len(), ML_PK_LEN);
@@ -320,7 +334,7 @@ mod tests {
         let ed_pk = ks.ed25519_public_key_bytes();
         verify_ed25519(&ed_pk, msg, &ed_sig).expect("ed25519 verify should succeed");
 
-        let ml_sig = ks.sign_ml_dsa(msg);
+        let ml_sig = ks.sign_ml_dsa(msg).unwrap();
         let ml_pk = ks.ml_dsa_public_key_bytes();
         verify_ml_dsa(&ml_pk, msg, &ml_sig).expect("ml-dsa verify should succeed");
     }
@@ -337,7 +351,7 @@ mod tests {
         let ed_pk = ks.ed25519_public_key_bytes();
         assert!(verify_ed25519(&ed_pk, &tampered, &ed_sig).is_err());
 
-        let ml_sig = ks.sign_ml_dsa(&msg);
+        let ml_sig = ks.sign_ml_dsa(&msg).unwrap();
         let ml_pk = ks.ml_dsa_public_key_bytes();
         assert!(verify_ml_dsa(&ml_pk, &tampered, &ml_sig).is_err());
     }
@@ -352,7 +366,7 @@ mod tests {
         let ed_sig = ks_a.sign_ed25519(msg);
         assert!(verify_ed25519(&ks_b.ed25519_public_key_bytes(), msg, &ed_sig).is_err());
 
-        let ml_sig = ks_a.sign_ml_dsa(msg);
+        let ml_sig = ks_a.sign_ml_dsa(msg).unwrap();
         assert!(verify_ml_dsa(&ks_b.ml_dsa_public_key_bytes(), msg, &ml_sig).is_err());
     }
 
@@ -377,7 +391,7 @@ mod tests {
     fn keys_document_shape_and_encoding() {
         let seed = MasterSeed::from_base64(&fixed_seed_b64()).unwrap();
         let ks = KeySet::derive(&seed, "caution-canary-demo").unwrap();
-        let doc = ks.keys_document("caution-canary-demo");
+        let doc = ks.keys_document();
 
         assert_eq!(doc.protocol, "caution-canary-v0");
         assert_eq!(doc.node_id, "caution-canary-demo");
@@ -397,5 +411,14 @@ mod tests {
         assert_eq!(json["key_epoch"], 0);
         assert_eq!(json["keys"][0]["alg"], "Ed25519");
         assert_eq!(json["keys"][1]["alg"], "ML-DSA-65");
+    }
+
+    #[test]
+    fn invalid_node_id_is_rejected_before_derivation() {
+        let seed = MasterSeed::from_base64(&fixed_seed_b64()).unwrap();
+        assert!(matches!(
+            KeySet::derive(&seed, "not a valid id"),
+            Err(KeyError::InvalidNodeId(_))
+        ));
     }
 }

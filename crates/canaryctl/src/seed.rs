@@ -12,6 +12,9 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use rand::rngs::OsRng;
 use rand::RngCore;
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::atomic_file;
 
 const ENV_VAR: &str = "CANARY_MASTER_SEED";
 
@@ -20,15 +23,18 @@ const ENV_VAR: &str = "CANARY_MASTER_SEED";
 /// set.
 pub fn generate(env_file: &Path, force: bool) -> Result<()> {
     let mut seed = [0u8; 32];
-    OsRng.fill_bytes(&mut seed);
-    let encoded = STANDARD.encode(seed);
+    OsRng
+        .try_fill_bytes(&mut seed)
+        .map_err(|err| anyhow::anyhow!("OS CSPRNG failed while generating master seed: {err}"))?;
+    let encoded = Zeroizing::new(STANDARD.encode(seed));
+    seed.zeroize();
 
-    let existing = if env_file.exists() {
+    let existing = Zeroizing::new(if env_file.exists() {
         std::fs::read_to_string(env_file)
             .with_context(|| format!("reading env file {}", env_file.display()))?
     } else {
         String::new()
-    };
+    });
 
     let prefix = format!("{ENV_VAR}=");
     let already_has_var = existing.lines().any(|line| line.starts_with(&prefix));
@@ -39,8 +45,8 @@ pub fn generate(env_file: &Path, force: bool) -> Result<()> {
         );
     }
 
-    let new_line = format!("{prefix}{encoded}");
-    let updated = if already_has_var {
+    let new_line = Zeroizing::new(format!("{prefix}{}", encoded.as_str()));
+    let updated = Zeroizing::new(if already_has_var {
         existing
             .lines()
             .map(|line| {
@@ -54,14 +60,14 @@ pub fn generate(env_file: &Path, force: bool) -> Result<()> {
             .join("\n")
             + "\n"
     } else if existing.is_empty() {
-        new_line + "\n"
+        format!("{}\n", new_line.as_str())
     } else if existing.ends_with('\n') {
-        existing + &new_line + "\n"
+        format!("{}{}\n", existing.as_str(), new_line.as_str())
     } else {
-        existing + "\n" + &new_line + "\n"
-    };
+        format!("{}\n{}\n", existing.as_str(), new_line.as_str())
+    });
 
-    std::fs::write(env_file, updated)
+    atomic_file::write(env_file, updated.as_bytes(), 0o600)
         .with_context(|| format!("writing env file {}", env_file.display()))?;
 
     eprintln!(
@@ -100,6 +106,12 @@ mod tests {
         let value = contents.trim().strip_prefix("CANARY_MASTER_SEED=").unwrap();
         let decoded = STANDARD.decode(value).unwrap();
         assert_eq!(decoded.len(), 32);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
         std::fs::remove_file(&path).unwrap();
     }
 

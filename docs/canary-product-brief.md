@@ -63,7 +63,9 @@ Caution’s hosted Reproducer uses [ReprOS](https://codeberg.org/stagex/repros) 
 
 ReprOS does not natively produce enclave measurements or Canary-format statements, so a thin Caution adapter layer bridges the two: a Caution-provided build script produces the EIF and an unsigned reproduction statement inside the VM, ReprOS’s native signing flow signs it, and the adapter re-wraps the result as a JWS and POSTs it to Canary’s reproducer endpoint. Reproducer signing keys are deliberately separate from Canary’s own status-signing keys so a compromise of one principal cannot forge the other’s evidence.
 
-See `reproducer-repros-design.md` for the full architecture, statement format, key separation model, and operational considerations. This is post-V0 work; V0 accepts customer-supplied signed statements and does not require the hosted Reproducer.
+The detailed hosted Reproducer architecture, statement format and key-separation model
+are post-V0 work. V0 uses measured static PCR configuration and does not accept
+customer-supplied approval statements or require a hosted Reproducer.
 
 ## Customer value
 

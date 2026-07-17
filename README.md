@@ -5,11 +5,11 @@ challenges one or more Caution/Bootproof attestation endpoints, checks PCR0/1/2 
 a static measured configuration, and publishes short-lived statements signed with
 both Ed25519 and ML-DSA-65.
 
-V0 is the first usable slice and showcase toward Milestone 3, not its full exit
-condition and not a durable monitoring service. Customer-approved source-release
-policy, STEVE traffic-path binding, alerts and durable evidence remain later work.
-The complete design and implementation plan is in
-[canary-v0-spec.md](canary-v0-spec.md).
+V0 is a standalone POC delivered in three internal implementation phases. This
+checkout currently contains Phase 1: the offline trust core and operator bootstrap
+commands. The live monitor, API, enclave packaging and deployment flow are Phase 2/3
+work. The complete design and implementation plan is in
+[docs/canary-v0-spec.md](docs/canary-v0-spec.md).
 
 ## Read this before enrolling PCRs
 
@@ -30,6 +30,7 @@ Then import `.caution/trusted_hashes.json`:
 ```sh
 canaryctl config add \
   --config canary.json \
+  --node-id caution-canary-demo \
   --id payments-prod \
   --name "Payments production" \
   --attestation-url https://payments.example.com/attestation \
@@ -41,6 +42,7 @@ canaryctl config add \
 ```sh
 canaryctl capture \
   --config canary.json \
+  --node-id caution-canary-demo \
   --id payments-prod \
   --name "Payments production" \
   --attestation-url https://payments.example.com/attestation
@@ -54,12 +56,12 @@ It does **not** prove that those values match reviewed or independently reproduc
 source. Run `caution verify` first for that stronger workflow. Canary never silently
 updates an enrolled PCR baseline.
 
-## V0 system
+## V0 system target
 
-- `canaryd`: enclave service, scheduler, Bootproof verifier, signer, SQLite history,
-  read-only API and minimal status page.
-- `canaryctl`: config creation/TOFU capture, seed generation, node inspection and
-  statement/evidence verification.
+- `canaryd` (Phase 2): enclave service, scheduler, Bootproof verifier, signer, SQLite
+  history, read-only API and minimal status page.
+- `canaryctl`: config creation/TOFU capture, seed generation and offline statement
+  verification. Node inspection arrives with attested metadata in Phase 2.
 - Bootproofd: Caution-provided `/attestation` for the Canary node itself.
 - Locksmith: injects one random 32-byte `CANARY_MASTER_SEED`.
 - StageX: produces the pinned, reproducible Rust application image.
@@ -90,7 +92,25 @@ The Canary statements use a hybrid Ed25519 + ML-DSA-65 envelope. They should be 
 hybrid post-quantum signed, not quantum-proof, because Nitro's attestation chain is
 still classical.
 
-## Bootstrap a V0 node
+## Phase 1 commands
+
+The commands available now are `config add`, `capture`, `seed generate`, and offline
+`verify-statement`. Check the exact interface with `canaryctl --help`.
+
+Offline statement verification requires public keys obtained through a separately
+trusted channel; fetching the statement and its keys from the same unverified node
+would prove only self-consistency:
+
+```sh
+canaryctl verify-statement \
+  --statement statement.json \
+  --keys trusted-keys.json
+```
+
+## Planned full V0 bootstrap (Phases 2/3)
+
+The following is the target evaluator flow. `canaryd`, `caution.hcl`, SQLite
+migrations, `inspect-node`, and the live endpoints are not implemented in Phase 1.
 
 The repository will contain `canary.json`, `Containerfile`, `caution.hcl`, the Rust
 workspace and embedded SQLite migrations.
@@ -136,7 +156,8 @@ workspace and embedded SQLite migrations.
    ```sh
    canaryctl inspect-node \
      --url https://<canary-host> \
-     --pcrs-file .caution/trusted_hashes.json
+     --pcrs-file .caution/trusted_hashes.json \
+     --keys-out trusted-keys.json
    ```
 
    `inspect-node` fetches a fresh Canary Bootproof attestation and checks that its
@@ -144,20 +165,21 @@ workspace and embedded SQLite migrations.
    is part of the measured image; the Locksmith-derived runtime keys are bound through
    attestation `user_data`.
 
-6. Verify a target statement and its evidence:
+6. Download a target statement and verify it against the exact key document saved
+   after its digest was checked by `inspect-node`:
 
    ```sh
+   curl -fsS https://<canary-host>/targets/payments-prod/statement -o statement.json
    canaryctl verify-statement \
-     --node-url https://<canary-host> \
-     --target payments-prod \
-     --pcrs-file .caution/trusted_hashes.json
+     --statement statement.json \
+     --keys trusted-keys.json
    ```
 
 The POC intentionally has no PostgreSQL, webhooks, webhook secret, OpenTimestamps,
 customer countersignature, live configuration API or durable history. A config change
 is a source change: commit it and deploy a newly measured Canary image.
 
-## Read-only endpoints
+## Planned read-only endpoints
 
 | Endpoint | Purpose |
 |---|---|

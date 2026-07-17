@@ -9,20 +9,23 @@
 //! they match reviewed or independently reproduced source (spec §4, README
 //! "Read this before enrolling PCRs").
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
-use canary_core::config::Target;
+use canary_core::config::{validate_attestation_url, ExpectedPcrs, Target};
 use canary_core::evidence::{pcrs_from_hex, verify_evidence};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use crate::config_cmd::{load_or_create_config, upsert_target, validate_and_write};
+
+const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const MAX_ATTESTATION_RESPONSE_BYTES: usize = 256 * 1024;
 
 #[derive(Serialize)]
 struct NonceRequest {
@@ -56,19 +59,60 @@ pub fn run(
     replace: bool,
     accept_tofu: bool,
 ) -> Result<()> {
+    validate_attestation_url(id, attestation_url)
+        .context("attestation URL failed validation; refusing network request")?;
+
+    // Validate every operator-controlled config field, including replacement
+    // semantics, before contacting the target. Candidate PCRs are replaced
+    // with the verified values below before anything is written.
+    let placeholder_pcr = hex::encode([1u8; 48]);
+    let mut config = load_or_create_config(config_path, node_id)?;
+    upsert_target(
+        &mut config,
+        Target {
+            id: id.to_string(),
+            name: name.to_string(),
+            attestation_url: attestation_url.to_string(),
+            expected_pcrs: ExpectedPcrs {
+                pcr0: placeholder_pcr.clone(),
+                pcr1: placeholder_pcr.clone(),
+                pcr2: placeholder_pcr,
+            },
+        },
+        replace,
+    )?;
+    config
+        .validate()
+        .context("proposed target failed validation; refusing network request")?;
+
     let mut nonce_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut nonce_bytes);
+    OsRng
+        .try_fill_bytes(&mut nonce_bytes)
+        .map_err(|err| anyhow::anyhow!("OS CSPRNG failed while generating nonce: {err}"))?;
     let nonce_b64 = STANDARD.encode(nonce_bytes);
 
-    let response: AttestationResponse = ureq::post(attestation_url)
-        .timeout(std::time::Duration::from_secs(15))
+    let agent = ureq::AgentBuilder::new()
+        .https_only(true)
+        .redirects(0)
+        .timeout(HTTP_TIMEOUT)
+        .build();
+    let http_response = agent
+        .post(attestation_url)
         .set("Content-Type", "application/json")
-        .send_json(NonceRequest {
-            nonce: nonce_b64.clone(),
-        })
-        .with_context(|| format!("POST {attestation_url}"))?
-        .into_json()
-        .context("parsing attestation response JSON")?;
+        .send_json(NonceRequest { nonce: nonce_b64 })
+        .with_context(|| format!("POST {attestation_url}"))?;
+
+    let mut response_bytes = Vec::new();
+    http_response
+        .into_reader()
+        .take((MAX_ATTESTATION_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut response_bytes)
+        .context("reading attestation response")?;
+    if response_bytes.len() > MAX_ATTESTATION_RESPONSE_BYTES {
+        bail!("attestation response exceeds {MAX_ATTESTATION_RESPONSE_BYTES} byte limit");
+    }
+    let response: AttestationResponse =
+        serde_json::from_slice(&response_bytes).context("parsing attestation response JSON")?;
 
     let document_bytes = STANDARD
         .decode(&response.document)
@@ -92,6 +136,20 @@ pub fn run(
         );
     }
 
+    let enrolled_target = config
+        .targets
+        .iter_mut()
+        .find(|target| target.id == id)
+        .context("preflight target disappeared from config")?;
+    enrolled_target.expected_pcrs = ExpectedPcrs {
+        pcr0: candidate.pcr0.clone(),
+        pcr1: candidate.pcr1.clone(),
+        pcr2: candidate.pcr2.clone(),
+    };
+    config
+        .validate()
+        .context("captured PCR values failed config validation")?;
+
     println!("Captured candidate PCRs from {attestation_url}:");
     println!("  PCR0: {}", candidate.pcr0);
     println!("  PCR1: {}", candidate.pcr1);
@@ -113,19 +171,6 @@ pub fn run(
         bail!("TOFU capture not confirmed; aborting without writing canary.json");
     }
 
-    let target = Target {
-        id: id.to_string(),
-        name: name.to_string(),
-        attestation_url: attestation_url.to_string(),
-        expected_pcrs: canary_core::config::ExpectedPcrs {
-            pcr0: candidate.pcr0,
-            pcr1: candidate.pcr1,
-            pcr2: candidate.pcr2,
-        },
-    };
-
-    let mut config = load_or_create_config(config_path, node_id)?;
-    upsert_target(&mut config, target, replace)?;
     let digest = validate_and_write(config_path, &config)?;
 
     println!("Wrote {}", config_path.display());

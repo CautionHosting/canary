@@ -12,8 +12,8 @@ rust-version = "1.85"
 # Internal
 canary-core = { path = "crates/canary-core" }
 
-# Bootproof verifier (git-pinned, house convention; verifier-only default feature)
-bootproof-sdk = { git = "https://git.distrust.co/public/bootproof", version = "0.1.0" }
+# Bootproof verifier (commit-pinned; verifier-only default feature)
+bootproof-sdk = { git = "https://git.distrust.co/public/bootproof", rev = "78f531a2c245404a9d8879fb71cc397096ae0077", version = "0.1.0" }
 
 # Crypto
 ed25519-dalek = { version = "2", features = ["rand_core"] }

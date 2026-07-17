@@ -1,10 +1,11 @@
 //! `canaryctl` — outside-enclave CLI (spec §5.1, §15).
 //!
 //! Owns config creation/validation, explicit TOFU capture, master-seed
-//! generation, and offline/online verification of signed statements. Never
+//! generation, and offline verification of signed statements. Never
 //! touches NSM/Nitro directly (spec §7.2) — evidence and statement
 //! verification both go through `canary-core`.
 
+mod atomic_file;
 mod capture;
 mod config_cmd;
 mod seed;
@@ -12,7 +13,7 @@ mod verify;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use config_cmd::{load_or_create_config, upsert_target, validate_and_write, TrustedHashesFile};
@@ -61,20 +62,14 @@ enum Command {
         #[command(subcommand)]
         command: SeedCommand,
     },
-    /// Verify a hybrid-signed statement, offline or against a live node (spec §9).
+    /// Verify a hybrid-signed statement against separately trusted keys (spec §9).
     VerifyStatement {
-        /// Path to a local statement JSON file (offline mode; use with `--keys`).
+        /// Path to a local statement JSON file.
         #[arg(long)]
-        statement: Option<PathBuf>,
-        /// Path to a local `/keys.json` document (offline mode; use with `--statement`).
+        statement: PathBuf,
+        /// Path to a separately trusted `/keys.json` document.
         #[arg(long)]
-        keys: Option<PathBuf>,
-        /// Base URL of a running Canary node (online mode; use with `--target`).
-        #[arg(long)]
-        node_url: Option<String>,
-        /// Target ID to fetch and verify (online mode; use with `--node-url`).
-        #[arg(long)]
-        target: Option<String>,
+        keys: PathBuf,
     },
 }
 
@@ -124,15 +119,16 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Config {
-            command: ConfigCommand::Add {
-                config,
-                id,
-                name,
-                attestation_url,
-                pcrs_file,
-                node_id,
-                replace,
-            },
+            command:
+                ConfigCommand::Add {
+                    config,
+                    id,
+                    name,
+                    attestation_url,
+                    pcrs_file,
+                    node_id,
+                    replace,
+                },
         } => config_add(
             &config,
             &id,
@@ -165,23 +161,7 @@ fn main() -> Result<()> {
             command: SeedCommand::Generate { env_file, force },
         } => seed::generate(&env_file, force),
 
-        Command::VerifyStatement {
-            statement,
-            keys,
-            node_url,
-            target,
-        } => match (statement, keys, node_url, target) {
-            (Some(statement), Some(keys), None, None) => {
-                verify::run_offline(&statement, &keys)
-            }
-            (None, None, Some(node_url), Some(target)) => {
-                verify::run_online(&node_url, &target)
-            }
-            _ => bail!(
-                "verify-statement requires either --statement and --keys (offline), \
-                 or --node-url and --target (online)"
-            ),
-        },
+        Command::VerifyStatement { statement, keys } => verify::run_offline(&statement, &keys),
     }
 }
 

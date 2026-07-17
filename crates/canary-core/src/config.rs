@@ -101,7 +101,7 @@ pub enum ConfigError {
     ZeroPcr { target_id: String, pcr: u8 },
 }
 
-fn is_valid_identifier(s: &str) -> bool {
+pub(crate) fn is_valid_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -133,7 +133,8 @@ fn validate_pcr(target_id: &str, index: u8, hex: &str) -> Result<(), ConfigError
     Ok(())
 }
 
-fn validate_attestation_url(target_id: &str, raw: &str) -> Result<(), ConfigError> {
+/// Validate one target URL before any network request is made.
+pub fn validate_attestation_url(target_id: &str, raw: &str) -> Result<(), ConfigError> {
     let url = Url::parse(raw).map_err(|e| ConfigError::InvalidUrl {
         target_id: target_id.to_string(),
         reason: e.to_string(),

@@ -1,6 +1,6 @@
 # Caution Canary V0 — Plan and System Specification
 
-Status: proposed implementation baseline for the first V0 slice of Milestone 3.
+Status: standalone V0 implementation baseline.
 
 This document is normative for V0. If another design document conflicts with it,
 this document wins for V0.
@@ -20,9 +20,9 @@ V0 should be useful as:
 
 It is deliberately not a durable monitoring platform yet.
 
-### 1.1 Relationship to the full Milestone 3
+### 1.1 V0 scope
 
-This V0 implements the smallest coherent slice of the broader Canary milestone:
+This V0 implements a small coherent Canary system:
 
 - Continuous fresh-nonce evidence checks.
 - `VERIFIED`, `FAILED`, `UNREACHABLE` and `STALE` semantics.
@@ -30,11 +30,9 @@ This V0 implements the smallest coherent slice of the broader Canary milestone:
 - An independently measurable Caution-hosted verifier.
 
 It intentionally defers customer-approved source-release policies, signed Reproducer
-input, STEVE encrypted-path key binding, independent client/widget consumption,
-multi-region verification, alerts and durable evidence. It therefore does **not**
-satisfy the full Milestone 3 exit condition yet; it is the usable POC on which those
-parts can be added. `canary-product-brief.md` remains the product direction, not the
-V0 acceptance contract.
+input, application-traffic key binding, independent client/widget consumption,
+multi-region verification, alerts and durable evidence. `canary-product-brief.md`
+remains the broader product direction, not the V0 acceptance contract.
 
 ## 2. V0 decisions
 
@@ -281,7 +279,8 @@ not image measurements; they are runtime-bound to that measured enclave by signe
 3. Hash the canonical `config` member of `/config.json` and the canonical
    `/keys.json` document, then compare both attested digests.
 
-`canaryctl inspect-node --pcrs-file <verified-canary-pcrs>` automates steps 2 and 3.
+`canaryctl inspect-node --pcrs-file <verified-canary-pcrs> --keys-out <path>` automates
+steps 2 and 3 and atomically saves the exact key document whose digest it verified.
 Without a PCR file it may inspect self-consistency, but must label the measurement as
 TOFU rather than independently reproduced.
 
@@ -363,6 +362,10 @@ The payload is RFC 8785 canonical JSON. Both signatures cover the exact same byt
 "caution.canary.statement.v0\0" || canonical_payload
 ```
 
+`target_origin` is the canonical serialized HTTPS origin derived from the configured
+attestation URL: lowercase/IDNA-normalized host, omitted default port, and no path,
+query, fragment, credentials or trailing slash.
+
 Envelope:
 
 ```json
@@ -400,7 +403,8 @@ No customer approval signature is required in V0.
 
 For non-`VERIFIED` states, the same payload reports a negative or inconclusive result;
 it does not assert that the PCR-match claim succeeded. `evidence_digest` is null when
-no evidence document was received.
+no attestation document bytes could be decoded, including a missing or invalid-base64
+`document`; malformed decoded COSE bytes still have a digest.
 
 For `VERIFIED` and `FAILED`, `expires_at` is the definitive observation time plus 180
 seconds. A later transport error must not extend it. `evidence_digest` is the SHA-256
@@ -409,6 +413,9 @@ digest of the decoded COSE attestation document bytes.
 For `PENDING`, `UNREACHABLE` and `STALE`, `observed_at` and `evidence_digest` are null
 and `expires_at` is `issued_at` plus 180 seconds. These statements report current
 Canary state; they do not assert receipt of target evidence.
+
+Consumers reject statements at `expires_at` and later. They also reject an `issued_at`
+more than 30 seconds in the future to bound clock-skew tolerance.
 
 ## 10. Probe outcomes and state
 
@@ -576,6 +583,7 @@ caution verify \
 # 2a. Add the independently verified values.
 canaryctl config add \
   --config canary.json \
+  --node-id caution-canary-demo \
   --id payments-prod \
   --name "Payments production" \
   --attestation-url https://payments.example.com/attestation \
@@ -584,6 +592,7 @@ canaryctl config add \
 # 2b. Or, for the fast POC path only, capture a TOFU baseline.
 canaryctl capture \
   --config canary.json \
+  --node-id caution-canary-demo \
   --id payments-prod \
   --name "Payments production" \
   --attestation-url https://payments.example.com/attestation
@@ -608,14 +617,15 @@ git push caution main
 caution verify --save-pcrs
 caution secret send-shard --keyring canary.private.asc
 
-# 6. Inspect config/key bindings and verify a target statement.
+# 6. Inspect config/key bindings, then verify downloaded artifacts offline.
 canaryctl inspect-node \
   --url https://<canary-host> \
-  --pcrs-file .caution/trusted_hashes.json
+  --pcrs-file .caution/trusted_hashes.json \
+  --keys-out trusted-keys.json
+curl -fsS https://<canary-host>/targets/payments-prod/statement -o statement.json
 canaryctl verify-statement \
-  --node-url https://<canary-host> \
-  --target payments-prod \
-  --pcrs-file .caution/trusted_hashes.json
+  --statement statement.json \
+  --keys trusted-keys.json
 ```
 
 Never commit `.env` or the unencrypted private keyring. Committing
@@ -623,9 +633,9 @@ Never commit `.env` or the unencrypted private keyring. Committing
 `.caution/secrets/`, `canary.json`, `Containerfile`, `caution.hcl` and `Cargo.lock` is
 expected for the POC.
 
-## 16. Implementation plan through Milestone 3
+## 16. V0 implementation phases
 
-### Milestone 1 — Offline trust core
+### Phase 1 — Offline trust core
 
 - Create the Rust workspace and StageX build skeleton.
 - Define strict config, keyset, evidence and statement schemas.
@@ -637,7 +647,7 @@ expected for the POC.
 Exit: config and statements round-trip reproducibly; replayed/wrong-nonce and either
 missing/invalid signature fail tests.
 
-### Milestone 2 — Working monitor
+### Phase 2 — Working monitor
 
 - Implement the hardened Bootproof HTTP client and SDK verification.
 - Implement the state machine, scheduler, jitter and immediate startup probes.
@@ -648,7 +658,7 @@ missing/invalid signature fail tests.
 Exit: one local process monitors multiple fixtures/targets independently and exposes
 verifiable evidence and hybrid statements.
 
-### Milestone 3 — Usable Caution enclave POC
+### Phase 3 — Usable Caution enclave POC
 
 - Finish the digest-pinned StageX Containerfile and `caution.hcl`.
 - Package Locksmith bundle/secrets correctly and deploy with one master seed.
@@ -699,7 +709,7 @@ Not in V0:
 - Customer approval/countersignature flows.
 - Multiple independent verifiers or quorum evaluation.
 - Live config reload or mutable policy management APIs.
-- STEVE/application-traffic binding, enforcement or remediation.
+- Application-traffic binding, enforcement or remediation.
 - Automatic replica discovery.
 
 Likely next steps, only after V0 is demonstrated:
@@ -711,7 +721,7 @@ Likely next steps, only after V0 is demonstrated:
    operational ownership are clear.
 4. Add durable external storage or a transparency log if audit retention becomes a
    real requirement.
-5. Add replica discovery and STEVE consumption for stronger traffic-path claims.
+5. Add replica discovery and independently consumed traffic-path claims.
 
 OpenTimestamps is intentionally deferred. It becomes useful only if V0 later makes a
 specific historical claim whose value exceeds the cost of operating and explaining a

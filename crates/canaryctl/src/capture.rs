@@ -1,0 +1,264 @@
+//! `canaryctl capture` — fast POC TOFU enrollment (spec §4, §15 step 2b).
+//!
+//! Challenges a live target's `/attestation` endpoint, extracts candidate
+//! PCR0/1/2 from the signed COSE_Sign1 document, validates the document's
+//! chain/signature/nonce against exactly those candidate values, then
+//! requires explicit human confirmation (or `--accept-tofu`) before writing
+//! them into `canary.json`. This is Trust On First Use: it proves only that
+//! future observations keep matching these live-enrolled values, never that
+//! they match reviewed or independently reproduced source (spec §4, README
+//! "Read this before enrolling PCRs").
+
+use std::io::Write as _;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{bail, Context, Result};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
+use canary_core::config::Target;
+use canary_core::evidence::{pcrs_from_hex, verify_evidence};
+use rand::rngs::OsRng;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+
+use crate::config_cmd::{load_or_create_config, upsert_target, validate_and_write};
+
+#[derive(Serialize)]
+struct NonceRequest {
+    nonce: String,
+}
+
+#[derive(Deserialize)]
+struct AttestationResponse {
+    document: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    manifest: serde_json::Value,
+}
+
+/// Candidate PCR0/1/2, lowercase hex, extracted from a signed attestation
+/// document before Canary's own PCR-match policy exists for this target.
+#[derive(Debug)]
+struct CandidatePcrs {
+    pcr0: String,
+    pcr1: String,
+    pcr2: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    config_path: &Path,
+    id: &str,
+    name: &str,
+    attestation_url: &str,
+    node_id: Option<&str>,
+    replace: bool,
+    accept_tofu: bool,
+) -> Result<()> {
+    let mut nonce_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce_b64 = STANDARD.encode(nonce_bytes);
+
+    let response: AttestationResponse = ureq::post(attestation_url)
+        .timeout(std::time::Duration::from_secs(15))
+        .set("Content-Type", "application/json")
+        .send_json(NonceRequest {
+            nonce: nonce_b64.clone(),
+        })
+        .with_context(|| format!("POST {attestation_url}"))?
+        .into_json()
+        .context("parsing attestation response JSON")?;
+
+    let document_bytes = STANDARD
+        .decode(&response.document)
+        .context("decoding base64 attestation document")?;
+
+    let candidate = extract_candidate_pcrs(&document_bytes)
+        .context("extracting candidate PCR0/1/2 from the signed attestation document")?;
+
+    let expected = pcrs_from_hex(&candidate.pcr0, &candidate.pcr1, &candidate.pcr2)
+        .context("building expected-PCR map from candidate values")?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before UNIX epoch")?;
+
+    let outcome = verify_evidence(&document_bytes, &expected, &nonce_bytes, now);
+    if !outcome.passed {
+        bail!(
+            "attestation evidence did not validate against its own candidate PCRs: {}",
+            outcome.reason.as_str()
+        );
+    }
+
+    println!("Captured candidate PCRs from {attestation_url}:");
+    println!("  PCR0: {}", candidate.pcr0);
+    println!("  PCR1: {}", candidate.pcr1);
+    println!("  PCR2: {}", candidate.pcr2);
+    println!();
+    println!(
+        "This is trust on first use (TOFU). This command verified fresh Bootproof \
+         evidence and confirms the chain, signature and nonce are valid for the \
+         PCR values shown above. It proves only that future observations continue \
+         to match the exact values explicitly enrolled from this live endpoint."
+    );
+    println!(
+        "It does NOT prove that these values match reviewed or independently \
+         reproduced source. Run `caution verify --save-pcrs` first and use \
+         `canaryctl config add --pcrs-file` for that stronger workflow."
+    );
+
+    if !accept_tofu && !confirm_interactively()? {
+        bail!("TOFU capture not confirmed; aborting without writing canary.json");
+    }
+
+    let target = Target {
+        id: id.to_string(),
+        name: name.to_string(),
+        attestation_url: attestation_url.to_string(),
+        expected_pcrs: canary_core::config::ExpectedPcrs {
+            pcr0: candidate.pcr0,
+            pcr1: candidate.pcr1,
+            pcr2: candidate.pcr2,
+        },
+    };
+
+    let mut config = load_or_create_config(config_path, node_id)?;
+    upsert_target(&mut config, target, replace)?;
+    let digest = validate_and_write(config_path, &config)?;
+
+    println!("Wrote {}", config_path.display());
+    println!("config_digest: {digest}");
+
+    Ok(())
+}
+
+fn confirm_interactively() -> Result<bool> {
+    print!("Enroll these TOFU PCR values into canary.json? [y/N] ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("reading confirmation from stdin")?;
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
+/// Decode a COSE_Sign1 document and pull PCR0/1/2 out of its CBOR-encoded
+/// payload map, as lowercase hex. This is intentionally local to `capture`:
+/// it reads *candidate* values from an unauthenticated-until-verified
+/// document, never establishes policy on its own.
+fn extract_candidate_pcrs(document: &[u8]) -> Result<CandidatePcrs> {
+    let top: serde_cbor::Value =
+        serde_cbor::from_slice(document).context("CBOR-decoding COSE_Sign1 document")?;
+
+    let elements = match top {
+        serde_cbor::Value::Array(elements) => elements,
+        serde_cbor::Value::Tag(_, inner) => match *inner {
+            serde_cbor::Value::Array(elements) => elements,
+            other => bail!("COSE_Sign1: expected a tagged array, got {other:?}"),
+        },
+        other => bail!("COSE_Sign1: expected an array, got {other:?}"),
+    };
+
+    if elements.len() != 4 {
+        bail!(
+            "COSE_Sign1: expected 4 elements (protected, unprotected, payload, signature), got {}",
+            elements.len()
+        );
+    }
+
+    let payload_bytes = match &elements[2] {
+        serde_cbor::Value::Bytes(b) => b.clone(),
+        other => bail!("COSE_Sign1: expected byte-string payload, got {other:?}"),
+    };
+
+    let payload: serde_cbor::Value =
+        serde_cbor::from_slice(&payload_bytes).context("CBOR-decoding attestation payload")?;
+
+    let payload_map = match &payload {
+        serde_cbor::Value::Map(m) => m,
+        other => bail!("attestation payload: expected a map, got {other:?}"),
+    };
+
+    let pcrs_value = payload_map
+        .get(&serde_cbor::Value::Text("pcrs".to_string()))
+        .context("attestation payload has no \"pcrs\" field")?;
+    let pcrs_map = match pcrs_value {
+        serde_cbor::Value::Map(m) => m,
+        other => bail!("attestation payload \"pcrs\": expected a map, got {other:?}"),
+    };
+
+    let pcr_hex = |index: u8| -> Result<String> {
+        let key = serde_cbor::Value::Integer(index as i128);
+        match pcrs_map.get(&key) {
+            Some(serde_cbor::Value::Bytes(bytes)) => Ok(hex::encode(bytes)),
+            Some(other) => bail!("PCR{index}: expected a byte-string, got {other:?}"),
+            None => bail!("attestation payload is missing PCR{index}"),
+        }
+    };
+
+    Ok(CandidatePcrs {
+        pcr0: pcr_hex(0)?,
+        pcr1: pcr_hex(1)?,
+        pcr2: pcr_hex(2)?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_document(pcrs: &[(i128, Vec<u8>)]) -> Vec<u8> {
+        let mut pcr_pairs = Vec::new();
+        for (k, v) in pcrs {
+            pcr_pairs.push((
+                serde_cbor::Value::Integer(*k),
+                serde_cbor::Value::Bytes(v.clone()),
+            ));
+        }
+        let pcrs_map = serde_cbor::Value::Map(pcr_pairs.into_iter().collect());
+        let payload_map = serde_cbor::Value::Map(
+            [(serde_cbor::Value::Text("pcrs".to_string()), pcrs_map)]
+                .into_iter()
+                .collect(),
+        );
+        let payload_bytes = serde_cbor::to_vec(&payload_map).unwrap();
+
+        let cose = serde_cbor::Value::Array(vec![
+            serde_cbor::Value::Bytes(vec![]),
+            serde_cbor::Value::Map(Default::default()),
+            serde_cbor::Value::Bytes(payload_bytes),
+            serde_cbor::Value::Bytes(vec![0u8; 96]),
+        ]);
+        serde_cbor::to_vec(&cose).unwrap()
+    }
+
+    #[test]
+    fn extracts_pcrs_from_well_formed_document() {
+        let doc = build_document(&[
+            (0, vec![0xaa; 48]),
+            (1, vec![0xbb; 48]),
+            (2, vec![0xcc; 48]),
+            (3, vec![0xdd; 48]),
+        ]);
+        let candidate = extract_candidate_pcrs(&doc).unwrap();
+        assert_eq!(candidate.pcr0, hex::encode([0xaa; 48]));
+        assert_eq!(candidate.pcr1, hex::encode([0xbb; 48]));
+        assert_eq!(candidate.pcr2, hex::encode([0xcc; 48]));
+    }
+
+    #[test]
+    fn missing_pcr_errors() {
+        let doc = build_document(&[(0, vec![0xaa; 48]), (1, vec![0xbb; 48])]);
+        let err = extract_candidate_pcrs(&doc).unwrap_err();
+        assert!(err.to_string().contains("PCR2"));
+    }
+
+    #[test]
+    fn garbage_document_errors_not_panics() {
+        let err = extract_candidate_pcrs(&[0xde, 0xad, 0xbe, 0xef]).unwrap_err();
+        assert!(!err.to_string().is_empty());
+    }
+}

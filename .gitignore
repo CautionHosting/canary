@@ -1,0 +1,15 @@
+# Rust build output
+/target
+**/*.rs.bk
+
+# Tooling
+/.omx
+
+# Secrets — never commit (spec §8.1, §15)
+.env
+*.env
+canary.private.asc
+.caution/secrets/*.key
+
+# OS
+.DS_Store

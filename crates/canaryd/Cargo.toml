@@ -1,0 +1,19 @@
+[package]
+name = "canaryd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "canaryd"
+path = "src/main.rs"
+
+[dependencies]
+canary-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

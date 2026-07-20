@@ -12,9 +12,19 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use bootproof_sdk::format::nitro::{Nitro, NitroPcrs};
 use bootproof_sdk::VerifiableSignedAttestationFormat;
+use chrono::{DateTime, SecondsFormat, Utc};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::canonical::{digest_canonical, CanonicalError};
+use crate::config::is_valid_identifier;
+
+/// Wire protocol identifier for evidence bundles served and consumed by V0.
+pub const EVIDENCE_PROTOCOL: &str = "caution-canary-evidence-v0";
 
 /// Stable, machine-readable probe outcome reasons (spec §10).
 ///
@@ -71,6 +81,150 @@ pub enum EvidenceError {
     },
 }
 
+/// A self-contained, language-neutral V0 evidence artifact.
+///
+/// `document` and `nonce` use canonical standard base64. `manifest` is copied
+/// from Bootproof only for diagnostics and is never used as verification
+/// policy. Expected PCRs deliberately remain outside this bundle so callers
+/// must obtain them through a separately trusted channel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceBundle {
+    pub protocol: String,
+    pub target_id: String,
+    pub document: String,
+    pub nonce: String,
+    pub observed_at: String,
+    pub evidence_digest: String,
+    pub manifest: serde_json::Value,
+    pub manifest_digest: String,
+}
+
+/// Validated and decoded fields from an [`EvidenceBundle`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedEvidenceBundle {
+    pub document: Vec<u8>,
+    pub nonce: [u8; 32],
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EvidenceBundleError {
+    #[error("unsupported evidence protocol {0:?}")]
+    UnsupportedProtocol(String),
+
+    #[error("invalid target identifier {0:?}")]
+    InvalidTargetId(String),
+
+    #[error("invalid standard base64 in {field}: {source}")]
+    InvalidBase64 {
+        field: &'static str,
+        #[source]
+        source: base64::DecodeError,
+    },
+
+    #[error("{0} must use canonical padded standard base64")]
+    NonCanonicalBase64(&'static str),
+
+    #[error("nonce must decode to exactly 32 bytes, got {0}")]
+    InvalidNonceLength(usize),
+
+    #[error("attestation document must not be empty")]
+    EmptyDocument,
+
+    #[error("invalid observed_at timestamp: {0}")]
+    InvalidTimestamp(#[from] chrono::ParseError),
+
+    #[error("observed_at must be canonical UTC RFC 3339 with whole seconds")]
+    NonCanonicalTimestamp,
+
+    #[error("{field} mismatch: declared {declared}, computed {computed}")]
+    DigestMismatch {
+        field: &'static str,
+        declared: String,
+        computed: String,
+    },
+
+    #[error("manifest canonicalization failed: {0}")]
+    Canonical(#[from] CanonicalError),
+}
+
+impl EvidenceBundle {
+    /// Validate the frozen V0 wire contract and decode the evidence inputs.
+    /// This checks both declared digests, but never treats `manifest` as
+    /// signed policy.
+    pub fn decode_and_validate(&self) -> Result<DecodedEvidenceBundle, EvidenceBundleError> {
+        if self.protocol != EVIDENCE_PROTOCOL {
+            return Err(EvidenceBundleError::UnsupportedProtocol(
+                self.protocol.clone(),
+            ));
+        }
+        if !is_valid_identifier(&self.target_id) {
+            return Err(EvidenceBundleError::InvalidTargetId(self.target_id.clone()));
+        }
+
+        let document = decode_canonical_base64("document", &self.document)?;
+        if document.is_empty() {
+            return Err(EvidenceBundleError::EmptyDocument);
+        }
+        let nonce_bytes = decode_canonical_base64("nonce", &self.nonce)?;
+        let nonce_len = nonce_bytes.len();
+        let nonce: [u8; 32] = nonce_bytes
+            .try_into()
+            .map_err(|_| EvidenceBundleError::InvalidNonceLength(nonce_len))?;
+
+        let observed_at: DateTime<Utc> = self.observed_at.parse()?;
+        if observed_at.to_rfc3339_opts(SecondsFormat::Secs, true) != self.observed_at {
+            return Err(EvidenceBundleError::NonCanonicalTimestamp);
+        }
+
+        ensure_digest(
+            "evidence_digest",
+            &self.evidence_digest,
+            &evidence_digest(&document),
+        )?;
+        ensure_digest(
+            "manifest_digest",
+            &self.manifest_digest,
+            &digest_canonical(&self.manifest)?,
+        )?;
+
+        Ok(DecodedEvidenceBundle {
+            document,
+            nonce,
+            observed_at,
+        })
+    }
+}
+
+fn decode_canonical_base64(
+    field: &'static str,
+    encoded: &str,
+) -> Result<Vec<u8>, EvidenceBundleError> {
+    let decoded = STANDARD
+        .decode(encoded)
+        .map_err(|source| EvidenceBundleError::InvalidBase64 { field, source })?;
+    if STANDARD.encode(&decoded) != encoded {
+        return Err(EvidenceBundleError::NonCanonicalBase64(field));
+    }
+    Ok(decoded)
+}
+
+fn ensure_digest(
+    field: &'static str,
+    declared: &str,
+    computed: &str,
+) -> Result<(), EvidenceBundleError> {
+    if declared != computed {
+        return Err(EvidenceBundleError::DigestMismatch {
+            field,
+            declared: declared.to_string(),
+            computed: computed.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// The result of verifying one Bootproof evidence document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceOutcome {
@@ -88,7 +242,7 @@ pub struct EvidenceOutcome {
 }
 
 /// SHA-256 digest of `bytes`, formatted as `sha256:<64 lowercase hex chars>`.
-fn sha256_digest(bytes: &[u8]) -> String {
+pub fn evidence_digest(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("sha256:{}", hex::encode(hasher.finalize()))
@@ -180,7 +334,7 @@ pub fn verify_evidence(
     nonce: &[u8],
     now: Duration,
 ) -> EvidenceOutcome {
-    let evidence_digest = sha256_digest(document_bytes);
+    let evidence_digest = evidence_digest(document_bytes);
 
     if expected_pcrs_are_zero(expected_pcrs) {
         return EvidenceOutcome {
@@ -223,7 +377,6 @@ pub fn verify_evidence(
 mod tests {
     use super::*;
     use base64::engine::general_purpose::STANDARD;
-    use base64::Engine as _;
 
     const VALID_TIME: Duration = Duration::from_secs(1_766_510_416);
     const PCR_0_AND_1: &str = "ef093e4c1fd13878956589833c0e396b935cdf5ae45c1cc595e1a19a6da5812850f0ef3e77df918cb2a86d88ddf9cc03";
@@ -242,6 +395,58 @@ mod tests {
 
     fn valid_nonce() -> Vec<u8> {
         hex::decode(NONCE).unwrap()
+    }
+
+    fn golden_bundle() -> EvidenceBundle {
+        EvidenceBundle {
+            protocol: EVIDENCE_PROTOCOL.to_string(),
+            target_id: "payments-prod".to_string(),
+            document: include_str!("../tests/data/aws-test.cbor.b64")
+                .trim()
+                .to_string(),
+            nonce: STANDARD.encode(valid_nonce()),
+            observed_at: "2025-12-23T17:20:16Z".to_string(),
+            evidence_digest:
+                "sha256:6afe913ae239fc83c44fd21c367f6ca9bf1b1b31d737c4720fd42cd49deb2c47"
+                    .to_string(),
+            manifest: serde_json::json!({}),
+            manifest_digest:
+                "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+                    .to_string(),
+        }
+    }
+
+    #[test]
+    fn published_evidence_vector_reproduces_byte_for_byte() {
+        let encoded = serde_json::to_string_pretty(&golden_bundle()).unwrap() + "\n";
+        assert_eq!(
+            encoded,
+            include_str!("../tests/data/evidence-v0-vector.json")
+        );
+
+        let decoded = golden_bundle().decode_and_validate().unwrap();
+        let outcome = verify_evidence(&decoded.document, &valid_pcrs(), &decoded.nonce, VALID_TIME);
+        assert!(outcome.passed);
+    }
+
+    #[test]
+    fn evidence_bundle_rejects_digest_and_nonce_tampering() {
+        let mut bad_digest = golden_bundle();
+        bad_digest.evidence_digest = format!("sha256:{}", "0".repeat(64));
+        assert!(matches!(
+            bad_digest.decode_and_validate(),
+            Err(EvidenceBundleError::DigestMismatch {
+                field: "evidence_digest",
+                ..
+            })
+        ));
+
+        let mut bad_nonce = golden_bundle();
+        bad_nonce.nonce = STANDARD.encode([0u8; 31]);
+        assert!(matches!(
+            bad_nonce.decode_and_validate(),
+            Err(EvidenceBundleError::InvalidNonceLength(31))
+        ));
     }
 
     #[test]
@@ -311,7 +516,7 @@ mod tests {
 
     #[test]
     fn evidence_digest_format() {
-        let digest = sha256_digest(b"hello world");
+        let digest = evidence_digest(b"hello world");
         assert!(digest.starts_with("sha256:"));
         let hex_part = digest.strip_prefix("sha256:").unwrap();
         assert_eq!(hex_part.len(), 64);
@@ -326,9 +531,9 @@ mod tests {
 
     #[test]
     fn evidence_digest_is_deterministic_and_input_sensitive() {
-        let a = sha256_digest(b"abc");
-        let b = sha256_digest(b"abc");
-        let c = sha256_digest(b"abcd");
+        let a = evidence_digest(b"abc");
+        let b = evidence_digest(b"abc");
+        let c = evidence_digest(b"abcd");
         assert_eq!(a, b);
         assert_ne!(a, c);
     }

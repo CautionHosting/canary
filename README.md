@@ -94,8 +94,9 @@ still classical.
 
 ## Phase 1 commands
 
-The commands available now are `config add`, `capture`, `seed generate`, and offline
-`verify-statement`. Check the exact interface with `canaryctl --help`.
+The commands available now are `config add`, `capture`, `seed generate`, offline
+`verify-statement`, and offline `verify-evidence`. Check the exact interface with
+`canaryctl --help`.
 
 Offline statement verification requires public keys obtained through a separately
 trusted channel; fetching the statement and its keys from the same unverified node
@@ -106,6 +107,23 @@ canaryctl verify-statement \
   --statement statement.json \
   --keys trusted-keys.json
 ```
+
+Evidence verification likewise requires PCR0/1/2 obtained through a separately
+trusted channel:
+
+```sh
+canaryctl verify-evidence \
+  --evidence evidence.json \
+  --pcrs-file .caution/trusted_hashes.json
+```
+
+The bundle's `observed_at` selects the certificate-validation time so historical
+evidence can be reproduced offline. A standalone bundle does not prove that its nonce
+or observation time was fresh. For freshness, also verify a trusted hybrid statement
+that binds the same `evidence_digest` and `observed_at`.
+
+Public interoperability vectors for both artifacts live under
+[`crates/canary-core/tests/data`](crates/canary-core/tests/data/README.md).
 
 ## Planned full V0 bootstrap (Phases 2/3)
 
@@ -194,3 +212,8 @@ is a source change: commit it and deploy a newly measured Canary image.
 
 The read-only API is public in V0. Target names, URLs, PCRs, public keys and evidence
 must therefore be treated as public information.
+
+## License
+
+This workspace is distributed under `AGPL-3.0-only`; see [LICENSE.md](LICENSE.md).
+That choice is explicit because the pinned `bootproof-sdk` source is AGPL-3.0.

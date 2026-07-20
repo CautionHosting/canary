@@ -273,8 +273,13 @@ pub fn sign_statement(payload: Payload, keyset: &KeySet) -> Result<Statement, St
     }
     let msg = signed_message(&payload)?;
 
-    let ed_sig = keyset.sign_ed25519(&msg);
     let ml_sig = keyset.sign_ml_dsa(&msg).map_err(StatementError::MlDsa)?;
+
+    Ok(build_statement(payload, keyset, &msg, ml_sig))
+}
+
+fn build_statement(payload: Payload, keyset: &KeySet, msg: &[u8], ml_sig: Vec<u8>) -> Statement {
+    let ed_sig = keyset.sign_ed25519(msg);
 
     let signer = Signer {
         verifier_id: payload.verifier_id.clone(),
@@ -291,10 +296,10 @@ pub fn sign_statement(payload: Payload, keyset: &KeySet) -> Result<Statement, St
         ],
     };
 
-    Ok(Statement {
+    Statement {
         payload,
         signers: vec![signer],
-    })
+    }
 }
 
 /// Verify `stmt` against the trusted public keys. V0 requires exactly one signer,
@@ -368,6 +373,20 @@ mod tests {
     use super::*;
     use crate::keys::MasterSeed;
     use base64::engine::general_purpose::STANDARD;
+
+    fn deterministic_statement(
+        payload: Payload,
+        keyset: &KeySet,
+        randomizer: &[u8; 32],
+    ) -> Statement {
+        validate_payload(&payload).unwrap();
+        assert_eq!(payload.verifier_id, keyset.node_id());
+        let msg = signed_message(&payload).unwrap();
+        let ml_sig = keyset
+            .sign_ml_dsa_with_randomizer(&msg, randomizer)
+            .unwrap();
+        build_statement(payload, keyset, &msg, ml_sig)
+    }
 
     fn test_keyset() -> KeySet {
         let seed_b64 = STANDARD.encode([0x11u8; 32]);
@@ -569,6 +588,46 @@ mod tests {
         let b = signed_message(&verified_payload()).unwrap();
         assert_eq!(a, b);
         assert!(a.starts_with(SIGN_PREFIX));
+    }
+
+    #[test]
+    fn published_statement_vector_reproduces_byte_for_byte() {
+        let seed_b64 = STANDARD.encode([0x11u8; 32]);
+        let seed = MasterSeed::from_base64(&seed_b64).unwrap();
+        let keyset = KeySet::derive(&seed, "caution-canary-demo").unwrap();
+        let randomizer = [0x22u8; 32];
+        let payload = verified_payload();
+        let message = signed_message(&payload).unwrap();
+        let statement = deterministic_statement(payload, &keyset, &randomizer);
+        let vector = serde_json::json!({
+            "protocol": "caution-canary-statement-vector-v0",
+            "description": "Public test-only vector; the seed and ML-DSA randomizer are not deployment secrets.",
+            "master_seed": seed_b64,
+            "ml_dsa_randomizer": STANDARD.encode(randomizer),
+            "signed_message": STANDARD.encode(message),
+            "verification_time": "2026-07-17T12:01:00Z",
+            "keys": keyset.keys_document(),
+            "statement": statement,
+        });
+        let encoded = serde_json::to_string_pretty(&vector).unwrap() + "\n";
+        assert_eq!(
+            encoded,
+            include_str!("../tests/data/statement-v0-vector.json")
+        );
+
+        let fixture: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let statement: Statement = serde_json::from_value(fixture["statement"].clone()).unwrap();
+        verify_statement(
+            &statement,
+            &keyset.ed25519_public_key_bytes(),
+            &keyset.ml_dsa_public_key_bytes(),
+            fixture["verification_time"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]

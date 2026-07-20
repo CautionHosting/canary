@@ -157,6 +157,20 @@ impl KeySet {
             .map_err(|err| KeyError::MlDsa(err.to_string()))
     }
 
+    /// Deterministic ML-DSA signing for published known-answer vectors only.
+    /// Production signing always uses the hedged OS-RNG path above.
+    #[cfg(test)]
+    pub(crate) fn sign_ml_dsa_with_randomizer(
+        &self,
+        msg: &[u8],
+        randomizer: &[u8; 32],
+    ) -> Result<Vec<u8>, KeyError> {
+        self.ml_private_key
+            .try_sign_with_seed(randomizer, msg, &[])
+            .map(|signature| signature.to_vec())
+            .map_err(|err| KeyError::MlDsa(err.to_string()))
+    }
+
     pub fn ed25519_public_key_bytes(&self) -> [u8; 32] {
         self.ed_signing_key.verifying_key().to_bytes()
     }

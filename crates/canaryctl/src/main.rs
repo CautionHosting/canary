@@ -10,6 +10,7 @@ mod capture;
 mod config_cmd;
 mod seed;
 mod verify;
+mod verify_evidence;
 
 use std::path::{Path, PathBuf};
 
@@ -70,6 +71,15 @@ enum Command {
         /// Path to a separately trusted `/keys.json` document.
         #[arg(long)]
         keys: PathBuf,
+    },
+    /// Verify a V0 evidence bundle against separately trusted PCRs.
+    VerifyEvidence {
+        /// Path to a local V0 evidence bundle JSON file.
+        #[arg(long)]
+        evidence: PathBuf,
+        /// Path to a separately trusted `.caution/trusted_hashes.json` file.
+        #[arg(long)]
+        pcrs_file: PathBuf,
     },
 }
 
@@ -162,6 +172,11 @@ fn main() -> Result<()> {
         } => seed::generate(&env_file, force),
 
         Command::VerifyStatement { statement, keys } => verify::run_offline(&statement, &keys),
+
+        Command::VerifyEvidence {
+            evidence,
+            pcrs_file,
+        } => verify_evidence::run_offline(&evidence, &pcrs_file),
     }
 }
 

@@ -230,6 +230,28 @@ For each target, every 60 seconds `canaryd`:
    equivalent to `Nitro::new(document, expected_pcrs).verify(now, nonce)`.
 5. Records the result and signs the new target statement.
 
+The V0 evidence endpoint and offline verifier use this frozen bundle schema:
+
+```json
+{
+  "protocol": "caution-canary-evidence-v0",
+  "target_id": "payments-prod",
+  "document": "<canonical padded standard-base64 COSE_Sign1>",
+  "nonce": "<canonical padded standard-base64 32 bytes>",
+  "observed_at": "2026-07-17T12:00:00Z",
+  "evidence_digest": "sha256:<decoded-document digest>",
+  "manifest": {},
+  "manifest_digest": "sha256:<RFC 8785 manifest digest>"
+}
+```
+
+Unknown fields, non-canonical encodings, a non-32-byte nonce, and either digest
+mismatch are rejected. Expected PCR0/1/2 are deliberately supplied separately and
+never taken from the bundle. `observed_at` selects the certificate-validation time
+for reproducible historical verification; the bundle alone does not prove that time
+or its nonce was fresh. Freshness requires a separately trusted hybrid statement
+binding the same `evidence_digest` and `observed_at`.
+
 The SDK verification must cover the embedded AWS root chain, certificate validity,
 COSE ES384 signature, exact nonce, and exact PCR0/1/2 equality. Config validation
 rejects all-zero/debug PCR policies.

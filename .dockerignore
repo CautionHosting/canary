@@ -1,4 +1,15 @@
-.git
-.env
-target
-.caution/secrets
+# Send only immutable source inputs and the three operator-owned deployment
+# inputs consumed by Containerfile. In particular, never send .env, private
+# keyrings, Cargo build output, or a locally-built canaryctl binary.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/**
+!migrations/
+!migrations/**
+!canary.json
+!.caution/
+!.caution/quorum-bundle.json
+!.caution/secrets/
+!.caution/secrets/CANARY_MASTER_SEED.asc

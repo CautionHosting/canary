@@ -5,11 +5,26 @@
 # Tooling
 /.omx
 
-# Secrets — never commit (spec §8.1, §15)
+# Secrets — never commit (spec §8.1, §15). Encrypted Caution secret payloads,
+# the public quorum bundle, and deployment metadata remain intentionally tracked.
 .env
+.env.*
 *.env
-canary.private.asc
+!.env.example
+*.private.asc
+*.private.key
+*.pem
+*.key
+*.p12
+*.pfx
 .caution/secrets/*.key
+
+# Caution/OCI build artifacts
+/eif-stage/
+/*.eif
+/*.oci.tar
+/*.tar
+/.caution/build/
 
 # OS
 .DS_Store

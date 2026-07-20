@@ -487,9 +487,14 @@ Even though targets are measured static configuration, the HTTP client must:
 - Pin the approved resolved address for the connection to prevent DNS rebinding.
 - Limit concurrency and add small randomized scheduling jitter.
 
-The Caution egress allowlist must independently restrict outbound access to the target
-origins. Config validation and deployment configuration should fail if their target
-host sets disagree.
+Current Caution egress is a boolean gate: it permits or denies outbound access but
+does not restrict it to Canary target origins. For V0, the target restriction is
+therefore Canary application-enforced by this section's measured configuration, URL
+validation, resolver policy and address pinning. This leaves residual risk if the host
+or Caution platform is compromised and can bypass or replace the application-level
+controls. Remove this caveat only after Caution supplies target-aware egress policy
+that is mechanically bound to the measured Canary configuration and verified at
+deployment.
 
 ## 12. Ephemeral SQLite
 
@@ -585,7 +590,11 @@ The root config uses:
   required in the image.
 - `CANARY_MASTER_SEED = env::vault("CANARY_MASTER_SEED")`.
 - Public application HTTP ingress on the `canaryd` port.
-- Egress limited to the configured target origins.
+- A broad TCP/443 egress rule enables Caution's current boolean egress gate; Caution
+  does not enforce the rule's destination or port. Target restriction is Canary
+  application-enforced in V0, which does not protect against host/platform compromise.
+  Replace this qualification only when target-aware Caution egress policy is
+  mechanically bound to and verified against the measured configuration.
 - `app_sources` pointing to the public source repository.
 - No debug block in the showcase deployment.
 

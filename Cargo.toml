@@ -41,5 +41,20 @@ anyhow = "1"
 url = "2"
 chrono = { version = "0.4", features = ["serde"] }
 
+# Phase 2 async service / network / storage
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal", "fs", "test-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "json"] }
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# HTTP test support
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

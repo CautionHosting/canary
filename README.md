@@ -6,9 +6,10 @@ a static measured configuration, and publishes short-lived statements signed wit
 both Ed25519 and ML-DSA-65.
 
 V0 is a standalone POC delivered in three internal implementation phases. This
-checkout currently contains Phase 1: the offline trust core and operator bootstrap
-commands. The live monitor, API, enclave packaging and deployment flow are Phase 2/3
-work. The complete design and implementation plan is in
+checkout contains Phase 1's offline trust core and Phase 2's working monitor,
+read-only API, ephemeral history, attested metadata and node inspection. Reproducible
+enclave packaging and the deployment demonstration remain Phase 3 work. The complete
+design is in
 [docs/canary-v0-spec.md](docs/canary-v0-spec.md).
 
 ## Read this before enrolling PCRs
@@ -58,14 +59,14 @@ updates an enrolled PCR baseline.
 
 ## V0 system target
 
-- `canaryd` (Phase 2): enclave service, scheduler, Bootproof verifier, signer, SQLite
+- `canaryd`: enclave service, scheduler, Bootproof verifier, signer, SQLite
   history, read-only API and minimal status page.
 - `canaryctl`: config creation/TOFU capture, seed generation and offline statement
-  verification. Node inspection arrives with attested metadata in Phase 2.
+  and evidence verification, plus attested node inspection.
 - Bootproofd: Caution-provided `/attestation` for the Canary node itself.
 - Locksmith: injects one random 32-byte `CANARY_MASTER_SEED`.
 - StageX: produces the pinned, reproducible Rust application image.
-- SQLite: lives under `/tmp` inside the enclave and is wiped on every restart.
+- SQLite: lives under `/tmp` inside the enclave and is wiped on enclave restart.
 
 One Canary node can monitor multiple enclaves. Add each target to `canary.json` with a
 unique ID. Every target receives an independent state, evidence bundle and signed
@@ -92,11 +93,11 @@ The Canary statements use a hybrid Ed25519 + ML-DSA-65 envelope. They should be 
 hybrid post-quantum signed, not quantum-proof, because Nitro's attestation chain is
 still classical.
 
-## Phase 1 commands
+## Operator commands
 
-The commands available now are `config add`, `capture`, `seed generate`, offline
-`verify-statement`, and offline `verify-evidence`. Check the exact interface with
-`canaryctl --help`.
+The commands available now are `config add`, `capture`, `seed generate`,
+`inspect-node`, offline `verify-statement`, and offline `verify-evidence`. Check the
+exact interface with `canaryctl --help`.
 
 Offline statement verification requires public keys obtained through a separately
 trusted channel; fetching the statement and its keys from the same unverified node
@@ -125,10 +126,25 @@ that binds the same `evidence_digest` and `observed_at`.
 Public interoperability vectors for both artifacts live under
 [`crates/canary-core/tests/data`](crates/canary-core/tests/data/README.md).
 
-## Planned full V0 bootstrap (Phases 2/3)
+## Phase 2 runtime contract
 
-The following is the target evaluator flow. `canaryd`, `caution.hcl`, SQLite
-migrations, `inspect-node`, and the live endpoints are not implemented in Phase 1.
+`canaryd` reads the measured config from `/app/canary.json`, reads only
+`CANARY_MASTER_SEED` for its root secret, writes Bootproof `user_data` to
+`/metadata.json`, stores current-lifetime diagnostics in
+`/tmp/canary/canary.sqlite3`, and listens on port 8080. It starts every target as a
+signed `PENDING` result, then probes immediately and every 60 seconds with bounded
+jitter and concurrency.
+
+The target client permits HTTPS only, resolves and pins a fresh public address for
+every probe, rejects mixed or prohibited DNS answers and redirects, and bounds
+connection time, total time and response size. A transport failure does not replace
+a still-fresh definitive statement; the warning is exposed separately.
+
+## Full V0 bootstrap (Phase 3 deployment pending)
+
+The following is the target evaluator flow. The monitor, migrations, inspection and
+application endpoints are implemented. `caution.hcl`, final StageX packaging and the
+live Caution deployment demonstration remain Phase 3 work.
 
 The repository will contain `canary.json`, `Containerfile`, `caution.hcl`, the Rust
 workspace and embedded SQLite migrations.
@@ -197,21 +213,24 @@ The POC intentionally has no PostgreSQL, webhooks, webhook secret, OpenTimestamp
 customer countersignature, live configuration API or durable history. A config change
 is a source change: commit it and deploy a newly measured Canary image.
 
-## Planned read-only endpoints
+## Read-only endpoints
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /` | Multi-target status page |
+| `GET /health` | Liveness and readiness status |
 | `GET /status.json` | Current states |
 | `GET /targets/{id}/statement` | Latest hybrid-signed statement |
 | `GET /targets/{id}/evidence` | Latest Bootproof evidence bundle |
 | `GET /targets/{id}/history` | Current-enclave-lifetime history |
 | `GET /config.json` | Measured config and digest |
 | `GET /keys.json` | Hybrid public key set |
-| `POST /attestation` | Canary's standard Caution/Bootproof attestation |
 
 The read-only API is public in V0. Target names, URLs, PCRs, public keys and evidence
 must therefore be treated as public information.
+
+Canary's own `POST /attestation` is served separately by Caution Bootproofd; it is not
+part of the `canaryd` router.
 
 ## License
 

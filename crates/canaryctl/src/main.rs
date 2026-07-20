@@ -6,8 +6,10 @@
 //! verification both go through `canary-core`.
 
 mod atomic_file;
+mod attestation;
 mod capture;
 mod config_cmd;
+mod inspect;
 mod seed;
 mod verify;
 mod verify_evidence;
@@ -80,6 +82,19 @@ enum Command {
         /// Path to a separately trusted `.caution/trusted_hashes.json` file.
         #[arg(long)]
         pcrs_file: PathBuf,
+    },
+    /// Verify fresh Canary node metadata against config and public keys (spec §7.3).
+    InspectNode {
+        /// Canary HTTPS origin, for example https://canary.example.com.
+        #[arg(long)]
+        url: String,
+        /// Optional independently verified Canary PCR0/1/2 file. Without it,
+        /// inspection is explicitly TOFU/self-consistency only.
+        #[arg(long)]
+        pcrs_file: Option<PathBuf>,
+        /// Output path for the exact canonical keys document after verification.
+        #[arg(long)]
+        keys_out: PathBuf,
     },
 }
 
@@ -177,6 +192,12 @@ fn main() -> Result<()> {
             evidence,
             pcrs_file,
         } => verify_evidence::run_offline(&evidence, &pcrs_file),
+
+        Command::InspectNode {
+            url,
+            pcrs_file,
+            keys_out,
+        } => inspect::run(&url, pcrs_file.as_deref(), &keys_out),
     }
 }
 

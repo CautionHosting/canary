@@ -290,3 +290,19 @@ fn capture_rejects_insecure_url_before_network_or_write() {
     assert!(!output.status.success());
     assert!(!config.exists());
 }
+
+#[test]
+fn inspect_node_rejects_non_https_origin_without_writing_keys() {
+    let dir = TempDir::new("inspect-http");
+    let keys = dir.join("keys.json");
+    let output = run(&[
+        "inspect-node",
+        "--url",
+        "http://canary.example.com",
+        "--keys-out",
+        path_arg(&keys),
+    ]);
+    assert!(!output.status.success());
+    assert!(!keys.exists());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("HTTPS origin"));
+}

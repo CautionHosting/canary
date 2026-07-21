@@ -5,10 +5,10 @@
 //! and never reconstructs runtime state from a prior database on restart.
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
     time::Duration,
 };
@@ -17,7 +17,7 @@ use canary_core::{
     canonical::digest,
     config::{parse_and_validate, Config, Target},
     keys::{KeySet, KeysDocument, MasterSeed},
-    node::{ConfigDocument, NodeMetadata},
+    node::{ConfigDocument, IdentityMode, NodeMetadata},
     state::{
         canonical_target_origin, DefinitiveObservation, StateReason, TargetReducer,
         TransportFailure, RESULT_TTL,
@@ -36,7 +36,10 @@ use zeroize::Zeroizing;
 use crate::{
     api::ApiState,
     metadata::write_metadata_atomic,
-    model::{AttemptWrite, CurrentWrite, RuntimeSnapshot, TargetSnapshot},
+    model::{
+        AttemptWrite, CurrentWrite, ExecutionEnvironment, RuntimeIdentity, RuntimeSnapshot,
+        TargetSnapshot,
+    },
     network::SystemResolver,
     probe::{probe_target, ProbeAttempt, ProbeClassification, ReqwestTransport},
     scheduler::{scheduled_offset, MAX_CONCURRENT_PROBES},
@@ -46,7 +49,16 @@ use crate::{
 const CONFIG_PATH: &str = "/app/canary.json";
 const DATABASE_PATH: &str = "/tmp/canary/canary.sqlite3";
 const METADATA_PATH: &str = "/metadata.json";
+const NSM_DEVICE_PATH: &str = "/dev/nsm";
 const SIGNING_PARALLELISM: usize = 2;
+
+static PROCESS_IDENTITY: OnceLock<Result<ProcessIdentity, String>> = OnceLock::new();
+
+#[derive(Clone)]
+struct ProcessIdentity {
+    environment: ExecutionEnvironment,
+    binary_digest: String,
+}
 
 /// Probe execution boundary used only to make monitor integration tests
 /// deterministic. Production construction always installs
@@ -87,21 +99,59 @@ pub struct RuntimeOptions {
     pub config_path: PathBuf,
     pub database_path: PathBuf,
     pub metadata_path: PathBuf,
-    /// Kept zeroizing and deliberately excluded from `Debug` output.
-    pub master_seed_base64: Zeroizing<String>,
+    pub identity_source: IdentitySource,
+}
+
+/// Source and lifecycle of the signing identity. Deliberately has no `Debug`
+/// implementation so a stable seed cannot be logged accidentally.
+#[derive(Clone)]
+pub enum IdentitySource {
+    Stable(Zeroizing<String>),
+    Ephemeral,
+}
+
+impl IdentitySource {
+    fn mode(&self) -> IdentityMode {
+        match self {
+            Self::Stable(_) => IdentityMode::Stable,
+            Self::Ephemeral => IdentityMode::Ephemeral,
+        }
+    }
 }
 
 impl RuntimeOptions {
-    /// Production paths are fixed; the only secret input is `CANARY_MASTER_SEED`.
-    pub fn from_environment() -> Result<Self, RuntimeError> {
-        let master_seed_base64 =
-            std::env::var("CANARY_MASTER_SEED").map_err(|_| RuntimeError::MissingMasterSeed)?;
+    /// Production paths are fixed. Stable mode requires
+    /// `CANARY_MASTER_SEED`; ephemeral mode refuses it to avoid ambiguous key
+    /// lifecycle semantics.
+    pub fn from_environment(ephemeral_identity: bool) -> Result<Self, RuntimeError> {
+        let identity_source = if ephemeral_identity {
+            if std::env::var_os("CANARY_MASTER_SEED").is_some() {
+                return Err(RuntimeError::ConflictingIdentityInputs);
+            }
+            select_identity_source(true, None)?
+        } else {
+            let master_seed_base64 =
+                std::env::var("CANARY_MASTER_SEED").map_err(|_| RuntimeError::MissingMasterSeed)?;
+            select_identity_source(false, Some(master_seed_base64))?
+        };
         Ok(Self {
             config_path: PathBuf::from(CONFIG_PATH),
             database_path: PathBuf::from(DATABASE_PATH),
             metadata_path: PathBuf::from(METADATA_PATH),
-            master_seed_base64: Zeroizing::new(master_seed_base64),
+            identity_source,
         })
+    }
+}
+
+fn select_identity_source(
+    ephemeral_identity: bool,
+    master_seed_base64: Option<String>,
+) -> Result<IdentitySource, RuntimeError> {
+    match (ephemeral_identity, master_seed_base64) {
+        (true, Some(_)) => Err(RuntimeError::ConflictingIdentityInputs),
+        (true, None) => Ok(IdentitySource::Ephemeral),
+        (false, Some(seed)) => Ok(IdentitySource::Stable(Zeroizing::new(seed))),
+        (false, None) => Err(RuntimeError::MissingMasterSeed),
     }
 }
 
@@ -109,6 +159,8 @@ impl RuntimeOptions {
 pub enum RuntimeError {
     #[error("CANARY_MASTER_SEED is required")]
     MissingMasterSeed,
+    #[error("--ephemeral-identity conflicts with CANARY_MASTER_SEED; choose one identity source")]
+    ConflictingIdentityInputs,
     #[error("could not read canary config: {0}")]
     ConfigRead(#[source] std::io::Error),
     #[error("invalid canary config: {0}")]
@@ -131,6 +183,8 @@ pub enum RuntimeError {
     SigningTask(#[from] tokio::task::JoinError),
     #[error("public API state initialization failed: {0}")]
     Api(#[source] Box<crate::api::ApiStateError>),
+    #[error("could not identify the running canaryd binary: {0}")]
+    RuntimeIdentity(String),
     #[error("monitor worker {worker} exited before cancellation")]
     WorkerExited { worker: String },
     #[error("monitor worker {worker} failed: {source}")]
@@ -245,8 +299,14 @@ impl Runtime {
             .validate()
             .map_err(canary_core::config::ConfigParseError::Invalid)?;
         let config = ConfigDocument::new(config)?;
-        let seed = MasterSeed::from_base64(options.master_seed_base64.as_str())?;
-        let keyset = Arc::new(KeySet::derive(&seed, &config.config.node_id)?);
+        let identity_mode = options.identity_source.mode();
+        let keyset = Arc::new(match &options.identity_source {
+            IdentitySource::Stable(master_seed_base64) => {
+                let seed = MasterSeed::from_base64(master_seed_base64.as_str())?;
+                KeySet::derive(&seed, &config.config.node_id)?
+            }
+            IdentitySource::Ephemeral => KeySet::generate_ephemeral(&config.config.node_id)?,
+        });
         let keys = keyset.keys_document();
         if let Some(parent) = options.database_path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -261,6 +321,7 @@ impl Runtime {
             .await?,
         );
         let now = canonical_second(clock.now());
+        let runtime_identity = runtime_identity(identity_mode)?;
         let signing = Arc::new(Semaphore::new(SIGNING_PARALLELISM));
         let mut targets = Vec::with_capacity(config.config.targets.len());
         let mut published = Vec::with_capacity(config.config.targets.len());
@@ -302,6 +363,7 @@ impl Runtime {
             protocol: canary_core::node::NODE_PROTOCOL.to_owned(),
             node_id: config.config.node_id.clone(),
             config_digest: config.config_digest.clone(),
+            runtime: runtime_identity,
             generated_at: now,
             targets: published,
         };
@@ -319,6 +381,7 @@ impl Runtime {
             config.config.node_id.clone(),
             config.config_digest.clone(),
             digest(api.canonical_keys()),
+            identity_mode,
         )?;
         write_metadata_atomic(&options.metadata_path, &metadata).await?;
         let runtime = Self {
@@ -786,6 +849,37 @@ impl Runtime {
     }
 }
 
+fn runtime_identity(identity_mode: IdentityMode) -> Result<RuntimeIdentity, RuntimeError> {
+    let process = PROCESS_IDENTITY
+        .get_or_init(compute_process_identity)
+        .clone()
+        .map_err(RuntimeError::RuntimeIdentity)?;
+    Ok(RuntimeIdentity {
+        environment: process.environment,
+        binary_digest: process.binary_digest,
+        identity_mode,
+    })
+}
+
+fn compute_process_identity() -> Result<ProcessIdentity, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("resolving current executable: {error}"))?;
+    let bytes = std::fs::read(&executable)
+        .map_err(|error| format!("reading {}: {error}", executable.display()))?;
+    Ok(ProcessIdentity {
+        environment: detect_execution_environment(Path::new(NSM_DEVICE_PATH)),
+        binary_digest: digest(&bytes),
+    })
+}
+
+fn detect_execution_environment(nsm_device: &Path) -> ExecutionEnvironment {
+    if nsm_device.exists() {
+        ExecutionEnvironment::NitroEnclave
+    } else {
+        ExecutionEnvironment::NonEnclave
+    }
+}
+
 fn pending_payload(
     target: &Target,
     origin: &str,
@@ -888,6 +982,50 @@ mod tests {
 
     struct AdjustableRuntimeClock(AtomicI64);
 
+    #[test]
+    fn execution_environment_tracks_nsm_device_availability() {
+        let temp = TempDir::new().unwrap();
+        let nsm = temp.path().join("nsm");
+        assert_eq!(
+            detect_execution_environment(&nsm),
+            ExecutionEnvironment::NonEnclave
+        );
+        std::fs::write(&nsm, b"fixture").unwrap();
+        assert_eq!(
+            detect_execution_environment(&nsm),
+            ExecutionEnvironment::NitroEnclave
+        );
+    }
+
+    #[test]
+    fn process_identity_has_a_canonical_binary_digest() {
+        let identity = runtime_identity(IdentityMode::Stable).unwrap();
+        let hex = identity.binary_digest.strip_prefix("sha256:").unwrap();
+        assert_eq!(hex.len(), 64);
+        assert!(hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(identity.identity_mode, IdentityMode::Stable);
+    }
+
+    #[test]
+    fn identity_source_selection_is_explicit_and_unambiguous() {
+        assert!(matches!(
+            select_identity_source(true, None).unwrap(),
+            IdentitySource::Ephemeral
+        ));
+        assert!(matches!(
+            select_identity_source(false, Some("seed".to_owned())).unwrap(),
+            IdentitySource::Stable(_)
+        ));
+        assert!(matches!(
+            select_identity_source(true, Some("seed".to_owned())),
+            Err(RuntimeError::ConflictingIdentityInputs)
+        ));
+        assert!(matches!(
+            select_identity_source(false, None),
+            Err(RuntimeError::MissingMasterSeed)
+        ));
+    }
+
     impl RuntimeClock for FixedRuntimeClock {
         fn now(&self) -> DateTime<Utc> {
             self.0
@@ -980,9 +1118,9 @@ mod tests {
             config_path: temp.path().join("canary.json"),
             database_path: temp.path().join("state.sqlite"),
             metadata_path: temp.path().join("metadata.json"),
-            master_seed_base64: Zeroizing::new(
+            identity_source: IdentitySource::Stable(Zeroizing::new(
                 base64::engine::general_purpose::STANDARD.encode([7u8; 32]),
-            ),
+            )),
         }
     }
 
@@ -1055,10 +1193,44 @@ mod tests {
         )
         .unwrap();
         metadata.validate().unwrap();
+        assert_eq!(metadata.identity_mode, IdentityMode::Stable);
         assert_eq!(
             metadata.keyset_digest,
             digest(runtime.api_state().canonical_keys())
         );
+    }
+
+    #[tokio::test]
+    async fn ephemeral_runtime_attests_mode_and_rotates_keys_on_every_start() {
+        let first_dir = TempDir::new().unwrap();
+        let mut first_options = options(&first_dir);
+        first_options.identity_source = IdentitySource::Ephemeral;
+        let first = Runtime::initialize_with_config(config(), first_options)
+            .await
+            .unwrap();
+
+        let second_dir = TempDir::new().unwrap();
+        let mut second_options = options(&second_dir);
+        second_options.identity_source = IdentitySource::Ephemeral;
+        let second = Runtime::initialize_with_config(config(), second_options)
+            .await
+            .unwrap();
+
+        assert_ne!(
+            first.api_state().canonical_keys(),
+            second.api_state().canonical_keys()
+        );
+        assert_eq!(
+            first.snapshot().await.runtime.identity_mode,
+            IdentityMode::Ephemeral
+        );
+        let metadata: NodeMetadata = serde_json::from_slice(
+            &tokio::fs::read(first_dir.path().join("metadata.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata.identity_mode, IdentityMode::Ephemeral);
     }
 
     #[test]

@@ -6,28 +6,44 @@ use canaryd::{
     api::router,
     runtime::{Runtime, RuntimeOptions},
 };
+use clap::Parser as _;
 use tokio_util::sync::CancellationToken;
+
+#[derive(clap::Parser)]
+#[command(name = "canaryd", version, about = "Caution Canary monitor")]
+struct Cli {
+    /// Generate a fresh in-enclave signing identity on every daemon start.
+    /// Conflicts with CANARY_MASTER_SEED.
+    #[arg(long)]
+    ephemeral_identity: bool,
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let cli = Cli::parse();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("canaryd=info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    if let Err(error) = run().await {
+    if let Err(error) = run(cli).await {
         tracing::error!(error = ?error, "canaryd terminated with an error");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
 }
 
-async fn run() -> anyhow::Result<()> {
+async fn run(cli: Cli) -> anyhow::Result<()> {
     tracing::info!("starting canaryd");
-    let runtime = Runtime::initialize(RuntimeOptions::from_environment()?).await?;
+    let runtime =
+        Runtime::initialize(RuntimeOptions::from_environment(cli.ephemeral_identity)?).await?;
     let config = runtime.config_document();
+    let runtime_identity = runtime.snapshot().await.runtime;
     tracing::info!(
         node_id = %config.config.node_id,
         config_digest = %config.config_digest,
+        execution_environment = ?runtime_identity.environment,
+        identity_mode = ?runtime_identity.identity_mode,
+        binary_digest = %runtime_identity.binary_digest,
         target_count = config.config.targets.len(),
         probe_interval_seconds = config.config.probe_interval_seconds,
         history_limit = config.config.history_limit,

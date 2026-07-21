@@ -111,7 +111,7 @@ enum Command {
         #[arg(long)]
         keys_out: PathBuf,
     },
-    /// Verify a live Canary and all selected target claims end to end.
+    /// Verify current published claims through every available node/evidence trust link.
     Verify {
         /// Canary origin. HTTPS is required unless --insecure is set.
         #[arg(long)]

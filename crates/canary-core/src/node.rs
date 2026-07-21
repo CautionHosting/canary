@@ -10,6 +10,16 @@ use crate::keys::KEY_EPOCH;
 /// Protocol embedded by Bootproofd into Canary's signed Nitro user data.
 pub const NODE_PROTOCOL: &str = "caution-canary-v0";
 
+/// Lifecycle of the node signing identity bound into fresh attestation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityMode {
+    /// A caller-supplied seed keeps the signer stable across restarts.
+    Stable,
+    /// A fresh in-process seed creates a new signer at every daemon start.
+    Ephemeral,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeMetadata {
@@ -18,6 +28,7 @@ pub struct NodeMetadata {
     pub config_digest: String,
     pub keyset_digest: String,
     pub key_epoch: u32,
+    pub identity_mode: IdentityMode,
 }
 
 /// Exact `/config.json` application response shape.  The configuration remains
@@ -52,6 +63,7 @@ impl NodeMetadata {
         node_id: String,
         config_digest: String,
         keyset_digest: String,
+        identity_mode: IdentityMode,
     ) -> Result<Self, NodeError> {
         let metadata = Self {
             protocol: NODE_PROTOCOL.to_string(),
@@ -59,6 +71,7 @@ impl NodeMetadata {
             config_digest,
             keyset_digest,
             key_epoch: KEY_EPOCH,
+            identity_mode,
         };
         metadata.validate()?;
         Ok(metadata)
@@ -137,9 +150,16 @@ mod tests {
 
     #[test]
     fn metadata_is_strict_and_validated() {
-        let metadata = NodeMetadata::new("canary-a".into(), digest('a'), digest('b')).unwrap();
+        let metadata = NodeMetadata::new(
+            "canary-a".into(),
+            digest('a'),
+            digest('b'),
+            IdentityMode::Stable,
+        )
+        .unwrap();
         assert_eq!(metadata.protocol, NODE_PROTOCOL);
-        assert!(serde_json::from_str::<NodeMetadata>(r#"{"protocol":"caution-canary-v0","node_id":"canary-a","config_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","keyset_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","key_epoch":0,"extra":true}"#).is_err());
+        assert_eq!(metadata.identity_mode, IdentityMode::Stable);
+        assert!(serde_json::from_str::<NodeMetadata>(r#"{"protocol":"caution-canary-v0","node_id":"canary-a","config_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","keyset_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","key_epoch":0,"identity_mode":"stable","extra":true}"#).is_err());
         let mut wrong = metadata;
         wrong.key_epoch = 1;
         assert!(matches!(wrong.validate(), Err(NodeError::WrongKeyEpoch)));

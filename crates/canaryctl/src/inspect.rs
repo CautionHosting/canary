@@ -12,7 +12,7 @@ use base64::Engine as _;
 use canary_core::canonical::{canonicalize, digest};
 use canary_core::evidence::{pcrs_from_hex, verify_evidence};
 use canary_core::keys::KeysDocument;
-use canary_core::node::{ConfigDocument, NodeMetadata};
+use canary_core::node::{ConfigDocument, IdentityMode, NodeMetadata};
 use rand::rngs::OsRng;
 use rand::RngCore as _;
 use serde::de::DeserializeOwned;
@@ -41,6 +41,7 @@ pub(crate) struct InspectedNode {
     pub(crate) keys: KeysDocument,
     pub(crate) keys_bytes: Vec<u8>,
     pub(crate) trust: NodeTrust,
+    pub(crate) metadata: Option<NodeMetadata>,
     agent: ureq::Agent,
     base: Url,
 }
@@ -74,8 +75,9 @@ impl InspectedNode {
     }
 
     /// Require an operator-enrolled key document to exactly match the live
-    /// canonical keyset. In attested mode this adds continuity to the fresh
-    /// attestation binding; in demo mode it is the sole TOFU key pin.
+    /// canonical keyset. In stable attested mode this adds continuity to the
+    /// fresh binding; in ephemeral mode it pins the current process; in demo
+    /// mode it is the sole TOFU key pin.
     pub(crate) fn verify_pinned_keys(&self, path: &Path) -> Result<()> {
         let pinned_bytes = std::fs::read(path)
             .with_context(|| format!("reading pinned Canary keys {}", path.display()))?;
@@ -139,6 +141,14 @@ pub fn run(
     println!("node_id: {}", inspected.config.config.node_id);
     println!("config_digest: {}", inspected.config.config_digest);
     println!("keyset_digest: {}", digest(&inspected.keys_bytes));
+    match inspected.metadata.as_ref().map(|value| value.identity_mode) {
+        Some(IdentityMode::Stable) => println!("identity_mode: stable"),
+        Some(IdentityMode::Ephemeral) => {
+            println!("identity_mode: ephemeral");
+            println!("WARNING: this key pin expires when canaryd restarts; enroll a new output file after restart.");
+        }
+        None => println!("identity_mode: unknown (Canary attestation skipped)"),
+    }
     println!("keys_out: {}", keys_out.display());
     Ok(())
 }
@@ -181,13 +191,14 @@ pub(crate) fn inspect(base_url: &str, pcrs_file: &Path) -> Result<InspectedNode>
     let user_data = outcome
         .user_data
         .context("verified Canary attestation is missing signed user_data")?;
-    validate_verified_binding(
+    let metadata = validate_verified_binding(
         &inspected.config,
         &inspected.keys,
         &inspected.keys_bytes,
         &user_data,
     )?;
     inspected.trust = NodeTrust::Attested;
+    inspected.metadata = Some(metadata);
     Ok(inspected)
 }
 
@@ -217,6 +228,7 @@ fn fetch_public_documents_with(
         keys,
         keys_bytes,
         trust: NodeTrust::UnattestedDev,
+        metadata: None,
         agent,
         base,
     })
@@ -541,6 +553,7 @@ mod tests {
             "node-a".to_owned(),
             config.config_digest.clone(),
             digest(&keys_bytes),
+            canary_core::node::IdentityMode::Stable,
         )
         .unwrap();
         (config, keys, keys_bytes, metadata)
@@ -610,6 +623,7 @@ mod tests {
             keys: keys.clone(),
             keys_bytes: keys_bytes.clone(),
             trust: NodeTrust::UnattestedDev,
+            metadata: None,
             agent: http_agent(true),
             base: parse_base_url("http://localhost:1111", true).unwrap(),
         };
@@ -759,6 +773,13 @@ mod tests {
             validate_verified_binding(&config, &keys, &keys_bytes, &metadata_bytes(&metadata))
                 .unwrap();
         assert_eq!(actual, metadata);
+
+        let mut ephemeral = metadata;
+        ephemeral.identity_mode = IdentityMode::Ephemeral;
+        let actual =
+            validate_verified_binding(&config, &keys, &keys_bytes, &metadata_bytes(&ephemeral))
+                .unwrap();
+        assert_eq!(actual.identity_mode, IdentityMode::Ephemeral);
     }
 
     #[test]
@@ -780,6 +801,7 @@ mod tests {
             "config_digest": metadata.config_digest,
             "keyset_digest": metadata.keyset_digest,
             "key_epoch": metadata.key_epoch,
+            "identity_mode": metadata.identity_mode,
             "extra": true,
         }))
         .unwrap();

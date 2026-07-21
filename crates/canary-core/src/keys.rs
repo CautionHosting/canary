@@ -15,6 +15,7 @@ use ed25519_dalek::{
 use fips204::ml_dsa_65::{self, PK_LEN as ML_PK_LEN, SIG_LEN as ML_SIG_LEN};
 use fips204::traits::{KeyGen, SerDes, Signer as _, Verifier as _};
 use hkdf::Hkdf;
+use rand::{rngs::OsRng, RngCore as _};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use zeroize::Zeroize;
@@ -34,6 +35,9 @@ pub enum KeyError {
 
     #[error("master seed must decode to exactly 32 bytes, got {0}")]
     InvalidSeedLength(usize),
+
+    #[error("OS CSPRNG failed while generating an ephemeral identity: {0}")]
+    Entropy(String),
 
     #[error("invalid node identifier {0:?}")]
     InvalidNodeId(String),
@@ -101,6 +105,19 @@ pub struct KeySet {
 }
 
 impl KeySet {
+    /// Generate a fresh process-lifetime identity from the OS CSPRNG.
+    ///
+    /// The temporary master seed is never serialized or persisted and is
+    /// zeroized after the normal V0 HKDF derivation completes.
+    pub fn generate_ephemeral(node_id: &str) -> Result<Self, KeyError> {
+        let mut bytes = [0_u8; 32];
+        OsRng
+            .try_fill_bytes(&mut bytes)
+            .map_err(|error| KeyError::Entropy(error.to_string()))?;
+        let seed = MasterSeed(bytes);
+        Self::derive(&seed, node_id)
+    }
+
     /// Derive the hybrid keypair for `node_id` from `seed`, per spec §8.2:
     ///
     /// ```text
@@ -313,6 +330,20 @@ mod tests {
         assert_ne!(
             ks_a.ml_dsa_public_key_bytes(),
             ks_b.ml_dsa_public_key_bytes()
+        );
+    }
+
+    #[test]
+    fn ephemeral_generation_produces_distinct_keysets() {
+        let first = KeySet::generate_ephemeral("node-a").unwrap();
+        let second = KeySet::generate_ephemeral("node-a").unwrap();
+        assert_ne!(
+            first.ed25519_public_key_bytes(),
+            second.ed25519_public_key_bytes()
+        );
+        assert_ne!(
+            first.ml_dsa_public_key_bytes(),
+            second.ml_dsa_public_key_bytes()
         );
     }
 

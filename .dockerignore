@@ -1,6 +1,6 @@
-# Send only immutable source inputs and the three operator-owned deployment
-# inputs consumed by Containerfile. In particular, never send .env, private
-# keyrings, Cargo build output, or a locally-built canaryctl binary.
+# Send only immutable source inputs and the optional public Locksmith
+# deployment artifacts consumed by Containerfile. In particular, never send
+# .env, private keyrings, Cargo build output, or a locally-built canaryctl.
 *
 !Cargo.toml
 !Cargo.lock

@@ -1,6 +1,7 @@
 //! One-shot live verification of a Canary node and its current target claims.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -8,11 +9,11 @@ use canary_core::{
     canonical::digest,
     config::Target,
     evidence::{pcrs_from_hex, verify_evidence, EvidenceBundle},
-    node::ConfigDocument,
+    node::{ConfigDocument, IdentityMode},
     state::canonical_target_origin,
     statement::{Statement, Status},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 
 use crate::inspect::{self, InspectedNode, NodeTrust};
@@ -26,6 +27,7 @@ pub fn run(
     keys_path: &Path,
     requested_targets: &[String],
 ) -> Result<()> {
+    let started_at = Utc::now();
     let node = match (pcrs_file, insecure) {
         (Some(path), false) => inspect::inspect(base_url, path)?,
         (None, true) => inspect::inspect_unattested(base_url)?,
@@ -34,15 +36,16 @@ pub fn run(
         }
     };
     node.verify_pinned_keys(keys_path)?;
-    print_node_report(&node, keys_path);
     let targets = select_targets(&node.config, requested_targets)?;
+    print_verification_context(started_at, requested_targets.is_empty(), targets.len());
+    print_node_report(&node, pcrs_file, keys_path);
     let mut authenticated_negative = false;
     let mut errors = Vec::new();
 
     for target in targets {
         match fetch_and_verify_target(&node, target) {
             Ok(report) => {
-                print_target_report(target, &report);
+                print_target_report(target, &report, node.trust);
                 authenticated_negative |= report.status != Status::Verified;
             }
             Err(error) => {
@@ -55,22 +58,24 @@ pub fn run(
     }
 
     if !errors.is_empty() {
-        println!("\nRESULT: ERROR");
+        println!("\nRESULT: ERROR — VERIFICATION CHAIN INCOMPLETE");
         bail!("verification failed for target(s): {}", errors.join(", "));
     }
     if authenticated_negative {
         match node.trust {
-            NodeTrust::Attested => println!("\nRESULT: AUTHENTICATED_NEGATIVE"),
+            NodeTrust::Attested => {
+                println!("\nRESULT: AUTHENTICATED_NEGATIVE — CHAIN VALID, TARGET NOT VERIFIED")
+            }
             NodeTrust::UnattestedDev => {
-                println!("\nRESULT: SIGNED_NEGATIVE (DEV MODE: CANARY IDENTITY NOT VERIFIED)")
+                println!("\nRESULT: SIGNED_NEGATIVE — TOFU SIGNER VALID, TARGET NOT VERIFIED")
             }
         }
         bail!("one or more targets reported a structurally valid signed state other than VERIFIED");
     }
     match node.trust {
-        NodeTrust::Attested => println!("\nRESULT: PASS"),
+        NodeTrust::Attested => println!("\nRESULT: PASS — FULL ATTESTED CHAIN VERIFIED"),
         NodeTrust::UnattestedDev => {
-            println!("\nRESULT: PASS (DEV MODE: CANARY IDENTITY NOT VERIFIED)")
+            println!("\nRESULT: PASS — VERIFIED AGAINST TOFU SIGNER + UNATTESTED CONFIG")
         }
     }
     Ok(())
@@ -111,7 +116,7 @@ pub fn run_history(
         }
     };
     node.verify_pinned_keys(keys_path)?;
-    print_node_report(&node, keys_path);
+    print_node_report(&node, pcrs_file, keys_path);
     let target = node
         .config
         .config
@@ -155,11 +160,7 @@ pub fn run_history(
             Some(evidence),
             issued_at,
         )?,
-        None => TargetReport {
-            status: historical.statement.payload.status,
-            reason: historical.statement.payload.reason.clone(),
-            evidence_replayed: false,
-        },
+        None => TargetReport::from_statement(&historical.statement, false, issued_at),
     };
 
     println!("\nHISTORICAL ATTEMPT {attempt_id}");
@@ -226,6 +227,32 @@ struct TargetReport {
     status: Status,
     reason: String,
     evidence_replayed: bool,
+    target_origin: String,
+    observed_at: Option<String>,
+    issued_at: String,
+    expires_at: String,
+    evidence_digest: Option<String>,
+    checked_at: DateTime<Utc>,
+}
+
+impl TargetReport {
+    fn from_statement(
+        statement: &Statement,
+        evidence_replayed: bool,
+        checked_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            status: statement.payload.status,
+            reason: statement.payload.reason.clone(),
+            evidence_replayed,
+            target_origin: statement.payload.target_origin.clone(),
+            observed_at: statement.payload.observed_at.clone(),
+            issued_at: statement.payload.issued_at.clone(),
+            expires_at: statement.payload.expires_at.clone(),
+            evidence_digest: statement.payload.evidence_digest.clone(),
+            checked_at,
+        }
+    }
 }
 
 fn fetch_and_verify_target(node: &InspectedNode, target: &Target) -> Result<TargetReport> {
@@ -310,11 +337,7 @@ fn verify_target_artifacts(
     let payload = &statement.payload;
 
     match (payload.evidence_digest.as_deref(), evidence) {
-        (None, None) => Ok(TargetReport {
-            status: payload.status,
-            reason: payload.reason.clone(),
-            evidence_replayed: false,
-        }),
+        (None, None) => Ok(TargetReport::from_statement(statement, false, now)),
         (None, Some(_)) => bail!("statement carries no evidence digest but evidence was returned"),
         (Some(_), None) => bail!("statement references evidence but no evidence was returned"),
         (Some(expected_digest), Some(bundle)) => {
@@ -372,11 +395,7 @@ fn verify_target_artifacts(
                 }
                 Status::Verified | Status::Failed => {}
             }
-            Ok(TargetReport {
-                status: payload.status,
-                reason: payload.reason.clone(),
-                evidence_replayed: true,
-            })
+            Ok(TargetReport::from_statement(statement, true, now))
         }
     }
 }
@@ -407,51 +426,160 @@ fn verify_statement_binding(
     Ok(())
 }
 
-fn print_node_report(node: &InspectedNode, keys_path: &Path) {
+fn print_verification_context(started_at: DateTime<Utc>, all_targets: bool, target_count: usize) {
+    println!("CANARY VERIFY");
+    println!("  Scope                   CURRENT PUBLISHED CLAIMS");
+    println!("  Started at              {}", timestamp(started_at));
+    if all_targets {
+        println!("  Targets                 ALL CONFIGURED ({target_count})");
+    } else {
+        println!("  Targets                 SELECTED ({target_count})");
+    }
+}
+
+fn print_node_report(node: &InspectedNode, pcrs_file: Option<&Path>, keys_path: &Path) {
+    println!();
     println!("CANARY NODE");
     match node.trust {
         NodeTrust::Attested => {
-            println!("  Nitro attestation       PASS");
-            println!("  Canary PCR identity     PASS");
+            println!("  Trust mode              ATTESTED");
+            println!("  Canary attestation      PASS — FRESH NONCE-BOUND");
+            println!("  Canary workload PCRs    PASS — PCR0/1/2");
+            println!(
+                "  Expected Canary PCRs    {}",
+                pcrs_file
+                    .expect("attested mode always has a PCR file")
+                    .display()
+            );
             println!("  Transport policy        HTTPS ONLY");
-            println!("  Config binding          PASS");
-            println!("  Attested key binding    PASS");
+            println!("  Config authenticity     PASS — MEASURED + ATTESTED");
+            println!("  Signing keys            PASS — ATTESTED KEYSET");
+            match node
+                .metadata
+                .as_ref()
+                .expect("attested inspection always retains signed metadata")
+                .identity_mode
+            {
+                IdentityMode::Stable => {
+                    println!("  Identity lifecycle      STABLE — EXTERNAL SEED");
+                    println!("  Pinned key continuity   PASS");
+                }
+                IdentityMode::Ephemeral => {
+                    println!("  Identity lifecycle      EPHEMERAL — CURRENT PROCESS");
+                    println!("  Current-process key pin PASS");
+                    println!("  Restart behavior        NEW KEYS — RE-ENROLL REQUIRED");
+                }
+            }
         }
         NodeTrust::UnattestedDev => {
-            println!("  Nitro attestation       SKIPPED / DEV MODE");
-            println!("  Canary PCR identity     NOT VERIFIED");
+            println!("  Trust mode              DEVELOPMENT / TOFU");
+            println!("  Canary attestation      SKIPPED — --insecure");
+            println!("  Canary workload PCRs    NOT VERIFIED");
             println!("  Transport policy        HTTP ALLOWED");
-            println!("  Config digest           INTERNALLY CONSISTENT");
-            println!("  Live signing keys       UNATTESTED");
+            println!("  Config authenticity     NOT VERIFIED — SELF-CONSISTENT ONLY");
+            println!("  Signing keys            NOT ATTESTED — TOFU PIN");
+            println!("  Identity lifecycle      UNKNOWN — UNATTESTED");
+            println!("  Pinned key continuity   PASS");
         }
     }
-    println!("  Pinned key continuity   PASS");
     println!("  Pinned keys             {}", keys_path.display());
     println!("  Node ID                 {}", node.config.config.node_id);
     println!("  Config digest           {}", node.config.config_digest);
     println!("  Keyset digest           {}", digest(&node.keys_bytes));
 }
 
-fn print_target_report(target: &Target, report: &TargetReport) {
-    println!("\nTARGET {}", target.id);
-    println!("  Statement signatures    PASS");
-    println!("  Statement freshness     PASS");
-    println!("  Config binding          PASS");
+fn print_target_report(target: &Target, report: &TargetReport, trust: NodeTrust) {
+    print!("{}", target_report_text(target, report, trust));
+}
+
+fn target_report_text(target: &Target, report: &TargetReport, trust: NodeTrust) -> String {
+    let mut output = String::new();
+    writeln!(output, "\nTARGET {}", target.id).unwrap();
+    writeln!(output, "  Claim                   CURRENT PUBLISHED").unwrap();
+    writeln!(output, "  Target origin           {}", report.target_origin).unwrap();
+    match trust {
+        NodeTrust::Attested => {
+            writeln!(
+                output,
+                "  PCR policy source       MEASURED + ATTESTED CONFIG"
+            )
+            .unwrap();
+        }
+        NodeTrust::UnattestedDev => {
+            writeln!(
+                output,
+                "  PCR policy source       UNATTESTED CONFIG — TOFU SIGNER"
+            )
+            .unwrap();
+        }
+    }
+    writeln!(
+        output,
+        "  Checked at              {}",
+        timestamp(report.checked_at)
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "  Evidence observed at    {}",
+        report.observed_at.as_deref().unwrap_or("—")
+    )
+    .unwrap();
+    writeln!(output, "  Statement issued at     {}", report.issued_at).unwrap();
+    writeln!(output, "  Statement expires at    {}", report.expires_at).unwrap();
+    writeln!(
+        output,
+        "  Statement signatures    PASS — ED25519 + ML-DSA-65"
+    )
+    .unwrap();
+    writeln!(output, "  Statement freshness     PASS AT CHECKED TIME").unwrap();
+    writeln!(output, "  Statement/config binding PASS").unwrap();
     if report.evidence_replayed {
-        println!("  Evidence replay         PASS");
+        let evidence_digest = report
+            .evidence_digest
+            .as_deref()
+            .expect("replayed evidence always has a signed digest");
+        writeln!(
+            output,
+            "  Statement/evidence link PASS — {}",
+            evidence_digest
+        )
+        .unwrap();
         match report.status {
-            Status::Verified => println!("  Target PCR policy       PASS"),
-            Status::Failed => println!("  Target PCR policy       FAILED / AUTHENTICATED"),
+            Status::Verified => {
+                writeln!(output, "  Evidence replay         PASS AT OBSERVED TIME").unwrap();
+                writeln!(output, "  Target Nitro + PCRs     PASS").unwrap();
+            }
+            Status::Failed => {
+                writeln!(
+                    output,
+                    "  Evidence replay         REPRODUCED {} AT OBSERVED TIME",
+                    report.reason
+                )
+                .unwrap();
+                writeln!(output, "  Target Nitro + PCRs     FAILED — AUTHENTICATED").unwrap();
+            }
             Status::Pending | Status::Unreachable | Status::Stale => {
                 unreachable!("non-definitive states cannot carry replayed evidence")
             }
         }
     } else {
-        println!("  Evidence replay         NOT AVAILABLE");
-        println!("  Target PCR policy       SIGNED STATE ONLY");
+        writeln!(output, "  Statement/evidence link NOT PRESENT").unwrap();
+        writeln!(output, "  Evidence replay         NOT AVAILABLE").unwrap();
+        writeln!(output, "  Target Nitro + PCRs     NOT CHECKED").unwrap();
     }
-    println!("  Status                  {}", status_text(report.status));
-    println!("  Reason                  {}", report.reason);
+    writeln!(
+        output,
+        "  Signed status           {}",
+        status_text(report.status)
+    )
+    .unwrap();
+    writeln!(output, "  Signed reason           {}", report.reason).unwrap();
+    output
+}
+
+fn timestamp(value: DateTime<Utc>) -> String {
+    value.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 fn status_text(status: Status) -> &'static str {
@@ -561,6 +689,20 @@ mod tests {
         .unwrap();
         assert_eq!(report.status, Status::Verified);
         assert!(report.evidence_replayed);
+
+        let development =
+            target_report_text(&config.config.targets[0], &report, NodeTrust::UnattestedDev);
+        assert!(development.contains("Claim                   CURRENT PUBLISHED"));
+        assert!(development.contains("PCR policy source       UNATTESTED CONFIG — TOFU SIGNER"));
+        assert!(development.contains("Statement signatures    PASS — ED25519 + ML-DSA-65"));
+        assert!(development.contains("Evidence replay         PASS AT OBSERVED TIME"));
+        assert!(development.contains("Target Nitro + PCRs     PASS"));
+        assert!(development.contains(&format!("Checked at              {}", timestamp(now))));
+        assert!(development.contains(&statement.payload.observed_at.clone().unwrap()));
+        assert!(development.contains(&statement.payload.expires_at));
+
+        let attested = target_report_text(&config.config.targets[0], &report, NodeTrust::Attested);
+        assert!(attested.contains("PCR policy source       MEASURED + ATTESTED CONFIG"));
     }
 
     #[test]
@@ -579,6 +721,9 @@ mod tests {
         .unwrap();
         assert_eq!(report.status, Status::Failed);
         assert!(report.evidence_replayed);
+        let output = target_report_text(&config.config.targets[0], &report, NodeTrust::Attested);
+        assert!(output.contains("Evidence replay         REPRODUCED PCR_MISMATCH AT OBSERVED TIME"));
+        assert!(output.contains("Target Nitro + PCRs     FAILED — AUTHENTICATED"));
     }
 
     #[test]

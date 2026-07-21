@@ -27,7 +27,7 @@ use canaryd::{
     api::router,
     network::{ResolveError, Resolver},
     probe::{probe_with_nonce_at, HttpResponse, ProbeAttempt, ProbeClassification, ProbeTransport},
-    runtime::{ProbeRunner, Runtime, RuntimeClock, RuntimeOptions},
+    runtime::{IdentitySource, ProbeRunner, Runtime, RuntimeClock, RuntimeOptions},
 };
 use chrono::TimeZone as _;
 use http_body_util::BodyExt as _;
@@ -215,7 +215,7 @@ fn options(temp: &TempDir) -> RuntimeOptions {
         config_path: temp.path().join("canary.json"),
         database_path: temp.path().join("state.sqlite"),
         metadata_path: temp.path().join("metadata.json"),
-        master_seed_base64: Zeroizing::new(STANDARD.encode([0x42_u8; 32])),
+        identity_source: IdentitySource::Stable(Zeroizing::new(STANDARD.encode([0x42_u8; 32]))),
     }
 }
 

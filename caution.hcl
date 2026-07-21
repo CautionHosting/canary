@@ -5,7 +5,7 @@ enclave "main" {
   build {
     containerfile = "Containerfile"
     app_sources = [
-      "https://REPLACE_WITH_PUBLIC_SOURCE_URL",
+      "https://codeberg.org/vkobel/canary",
     ]
     cache = false
   }
@@ -26,7 +26,7 @@ enclave "main" {
     }
 
     http {
-      domain = "REPLACE_WITH_PUBLIC_HTTPS_DOMAIN"
+      domain = "canary.kobl.one"
       port   = 8080
     }
   }
@@ -34,15 +34,6 @@ enclave "main" {
   # Deliberately omit resources: use Caution's defaults.
   unit "default" {
     command = "/app/canaryd"
-
-    # Stable identity (default): package the Locksmith artifacts described in
-    # README and release CANARY_MASTER_SEED after caution verify.
-    env {
-      CANARY_MASTER_SEED = env::vault("CANARY_MASTER_SEED")
-    }
-
-    # Ephemeral identity: replace the env block above with this line. No
-    # Locksmith bundle, encrypted seed, or shard release is required.
-    # args = ["--ephemeral-identity"]
+    args    = ["--ephemeral-identity"]
   }
 }

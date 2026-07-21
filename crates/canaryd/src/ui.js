@@ -8,6 +8,8 @@
     [...dialog.querySelectorAll("[data-panel]")].map((panel) => [panel.dataset.panel, panel]),
   );
   const tabs = [...dialog.querySelectorAll("[data-tab]")];
+  const runtimeEnvironment = document.body.dataset.runtimeEnvironment;
+  const isNitroEnclave = runtimeEnvironment === "nitro_enclave";
   let currentTarget = null;
   let loadGeneration = 0;
 
@@ -17,16 +19,23 @@
     return `/targets/${encodeURIComponent(currentTarget.id)}/${kind}`;
   }
 
+  function enrollmentCommand() {
+    if (!isNitroEnclave) {
+      return `canaryctl inspect-node --url ${window.location.origin} --insecure --keys-out canary-keys.json`;
+    }
+    return `caution verify --save-pcrs\n\ncanaryctl inspect-node --url ${window.location.origin} --pcrs-file .caution/trusted_hashes.json --keys-out canary-keys.json`;
+  }
+
   function verificationCommand(targetId) {
     const target = targetId ? ` \\\n  --target ${targetId}` : "";
-    if (window.location.protocol !== "https:") {
+    if (!isNitroEnclave) {
       return `canaryctl verify \\\n  --url ${window.location.origin} \\\n  --insecure \\\n  --keys canary-keys.json${target}`;
     }
     return `canaryctl verify \\\n  --url ${window.location.origin} \\\n  --pcrs-file .caution/trusted_hashes.json \\\n  --keys canary-keys.json${target}`;
   }
 
   function historyVerificationCommand(targetId, attemptId) {
-    const trust = window.location.protocol === "https:"
+    const trust = isNitroEnclave
       ? "--pcrs-file .caution/trusted_hashes.json"
       : "--insecure";
     return `canaryctl verify-history \\\n  --url ${window.location.origin} \\\n  ${trust} \\\n  --keys canary-keys.json \\\n  --target ${targetId} \\\n  --attempt ${attemptId}`;
@@ -264,11 +273,9 @@
     });
   }
 
+  const enrollment = document.querySelector("#enroll-command");
+  if (enrollment) enrollment.textContent = enrollmentCommand();
   setCommand(document.querySelector("#all-targets-command"), null);
-  if (window.location.protocol !== "https:") {
-    const note = document.querySelector("#command-trust-note");
-    if (note) note.textContent = "Demo mode skips Canary attestation and requires a previously TOFU-enrolled canary-keys.json pin. It still does not establish Canary workload identity or the authenticity of the initial enrollment.";
-  }
 
   let hashTarget = "";
   try {

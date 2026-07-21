@@ -7,10 +7,31 @@
 
 use canary_core::{
     evidence::EvidenceBundle,
+    node::IdentityMode,
     statement::{Statement, Status},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+/// Local execution-environment hint reported by `canaryd`.
+///
+/// This is presentation metadata, not remote-attestation evidence. An
+/// untrusted process can lie about it; external verifiers must still use the
+/// fresh Canary attestation flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionEnvironment {
+    NitroEnclave,
+    NonEnclave,
+}
+
+/// Immutable identity details for this exact daemon process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeIdentity {
+    pub environment: ExecutionEnvironment,
+    pub binary_digest: String,
+    pub identity_mode: IdentityMode,
+}
 
 /// The immutable per-target view consumed by the public API.
 ///
@@ -37,6 +58,7 @@ pub struct RuntimeSnapshot {
     pub protocol: String,
     pub node_id: String,
     pub config_digest: String,
+    pub runtime: RuntimeIdentity,
     pub generated_at: DateTime<Utc>,
     pub targets: Vec<TargetSnapshot>,
 }

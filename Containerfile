@@ -37,16 +37,21 @@ ENTRYPOINT ["/app/canaryd"]
 
 FROM build AS deployment-inputs
 
-# These are operator-owned deployment inputs. Keep the encrypted seed only;
-# .dockerignore excludes .env, private keyrings, and all other build output.
+# canary.json is always measured. Locksmith inputs are optional so the same
+# reproducible recipe supports both stable and ephemeral identity deployments.
+# When either Locksmith artifact exists, require and stage both.
 COPY canary.json /inputs/canary.json
-COPY .caution/quorum-bundle.json /inputs/bundle.json
-COPY .caution/secrets/CANARY_MASTER_SEED.asc /inputs/CANARY_MASTER_SEED.asc
-RUN <<-'EOF'
+RUN --mount=type=bind,source=.,target=/context,ro <<-'EOF'
 	set -eux
 	install -Dm644 /inputs/canary.json /staged/app/canary.json
-	install -Dm644 /inputs/bundle.json /staged/etc/caution/bundle.json
-	install -Dm644 /inputs/CANARY_MASTER_SEED.asc /staged/etc/caution/secrets/CANARY_MASTER_SEED.asc
+	bundle=/context/.caution/quorum-bundle.json
+	secret=/context/.caution/secrets/CANARY_MASTER_SEED.asc
+	if [ -e "${bundle}" ] || [ -e "${secret}" ]; then
+		test -f "${bundle}"
+		test -f "${secret}"
+		install -Dm644 "${bundle}" /staged/etc/caution/bundle.json
+		install -Dm644 "${secret}" /staged/etc/caution/secrets/CANARY_MASTER_SEED.asc
+	fi
 EOF
 
 FROM --platform=linux/amd64 stagex/core-filesystem@sha256:cd3a66471ce1f630fa77d5c9bd9829f9f9fab6302a1aaa64d67b74f1f069b750 AS run
@@ -55,9 +60,6 @@ FROM --platform=linux/amd64 stagex/core-filesystem@sha256:cd3a66471ce1f630fa77d5
 # as 1777. canaryd atomically creates /metadata.json, so it deliberately runs
 # as numeric root. This final stage is copy-only because it contains no shell.
 USER 0:0
-COPY --from=deployment-inputs /staged/app/canaryd /app/canaryd
-COPY --from=deployment-inputs /staged/app/canary.json /app/canary.json
-COPY --from=deployment-inputs /staged/etc/caution/bundle.json /etc/caution/bundle.json
-COPY --from=deployment-inputs /staged/etc/caution/secrets/CANARY_MASTER_SEED.asc /etc/caution/secrets/CANARY_MASTER_SEED.asc
+COPY --from=deployment-inputs /staged/ /
 
 ENTRYPOINT ["/app/canaryd"]

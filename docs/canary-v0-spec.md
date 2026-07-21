@@ -15,7 +15,8 @@ statements signed with both Ed25519 and ML-DSA-65.
 V0 should be useful as:
 
 - A continuous check that an enrolled endpoint still presents the same measured code.
-- A public, independently inspectable demo of Caution, Bootproof, Locksmith and StageX.
+- A public, independently inspectable demo of Caution, Bootproof and StageX, with
+  Locksmith optional when stable identity is required.
 - A foundation for later customer approvals, independent reproducers and co-verifiers.
 
 It is deliberately not a durable monitoring platform yet.
@@ -46,7 +47,7 @@ V0 and are not specified in this repository.
 | Expected PCR enrollment | Independently verified PCRs preferred; explicit TOFU capture allowed for the POC |
 | Claim | One fixed, narrowly scoped V0 claim |
 | Signatures | One Caution signer producing required Ed25519 + ML-DSA-65 signatures |
-| Secret material | One random Locksmith-injected master seed with domain-separated child-key derivation |
+| Secret material | Stable: one random Locksmith-injected master seed. Ephemeral: one fresh process-local CSPRNG seed. Both use the same domain-separated child-key derivation |
 | Storage | Enclave-local SQLite under `/tmp`; wiped on enclave restart |
 | API | Public read-only status, evidence, config and key endpoints |
 | Alerts | None; no webhooks or webhook secret in V0 |
@@ -121,7 +122,8 @@ Bootproof manifest is never treated as policy.
 ```mermaid
 flowchart LR
     O["Operator"] -->|"commit measured config"| C["Canary enclave"]
-    L["Locksmith"] -->|"master seed"| C
+    L["Locksmith (stable mode)"] -->|"master seed"| C
+    R["In-enclave OS CSPRNG (ephemeral mode)"] -->|"process-lifetime seed"| C
     C -->|"POST nonce"| T1["Target enclave A /attestation"]
     C -->|"POST nonce"| T2["Target enclave B /attestation"]
     T1 -->|"Bootproof evidence"| C
@@ -135,7 +137,7 @@ flowchart LR
 `canaryd` runs inside the enclave and owns:
 
 - Static config validation and digesting.
-- Master-seed child-key derivation.
+- Stable-seed loading or ephemeral-seed generation and child-key derivation.
 - Bootproof target probes and verification.
 - State calculation and statement signing.
 - Ephemeral SQLite observations.
@@ -146,12 +148,14 @@ flowchart LR
 
 - Creating and validating `canary.json`.
 - Explicit TOFU capture.
-- Generating a random master seed for Locksmith encryption.
+- Generating a random stable master seed for later Locksmith encryption.
 - Inspecting a deployed Canary's attestation, config and key bindings.
 - Verifying signed statements and evidence bundles offline.
 
 Caution/Bootproof owns Canary's public `POST /attestation`. `canaryd` must not
-implement or proxy that endpoint itself.
+implement or proxy that endpoint itself. The status surface may check whether
+`/dev/nsm` exists to choose enclave/non-enclave guidance, but it must label that as
+an untrusted local hint and must not open NSM or generate attestation documents.
 
 ### 5.2 Multiple targets
 
@@ -288,11 +292,14 @@ reporting ready. Bootproofd embeds it in the signed Nitro `user_data`:
   "node_id": "caution-canary-demo",
   "config_digest": "sha256:...",
   "keyset_digest": "sha256:...",
-  "key_epoch": 0
+  "key_epoch": 0,
+  "identity_mode": "stable"
 }
 ```
 
-`keyset_digest` binds the canonical `/keys.json` document. The full ML-DSA-65 public
+`identity_mode` is exactly `stable` or `ephemeral` and binds the claimed signing-key
+lifecycle into the fresh attestation. `keyset_digest` binds the canonical `/keys.json`
+document. The full ML-DSA-65 public
 key is intentionally served from `/keys.json` rather than placed in Nitro `user_data`;
 the digest keeps the attested metadata small.
 
@@ -317,6 +324,30 @@ must require the live canonical `/keys.json` bytes to equal the pinned file befo
 using the keys for either signature. This makes key continuity and rotation explicit;
 `inspect-node` is the only enrollment operation and never overwrites an existing pin.
 
+`canaryctl verify` verifies each selected target's current published signed claim; it
+does not claim to verify the latest network attempt. A fresh definitive claim may
+remain current after a later transport failure. Its normal output must therefore show
+the command start time and, per target, the signed `observed_at`, `issued_at` and
+`expires_at` timestamps. `verify-history` remains the operation for one exact retained
+attempt. These timestamps are signed Canary freshness fields, not an external
+timestamp-authority proof. Multiple selected targets are independently fetched and
+checked; the command must not imply an atomic aggregate snapshot.
+
+The live report must distinguish:
+
+- attested Canary identity from development/TOFU signer continuity;
+- measured and attested configuration from self-consistent but unauthenticated config;
+- both required statement signatures from the statement/config and
+  statement/evidence bindings;
+- replay at the signed observation time from statement freshness at the live check
+  time; and
+- an aggregated Nitro/nonce/PCR result from unsupported fictional per-subcheck
+  results.
+
+An attested all-target success may be described as a full attested chain. An insecure
+success must instead say that it verified against a TOFU signer and unauthenticated
+config. Negative signed results and incomplete verification chains exit nonzero.
+
 For out-of-Caution test/demo deployments only, `inspect-node --insecure` and
 `verify --insecure` may accept an HTTP origin and must skip Canary attestation
 entirely. They validate the served config digest, canonical key document, shared node
@@ -324,14 +355,17 @@ identity and must warn that Canary workload identity is not established.
 `inspect-node --insecure` saves an explicit TOFU key pin; `verify --insecure` and
 `verify-history --insecure` require exact equality with that operator-provided
 `--keys` pin before validating target statements and evidence. Initial key enrollment
-remains TOFU.
+remains TOFU. Target Nitro evidence is still replayed against PCR0/1/2 from the served
+config, but those expected PCRs are not an independently authenticated policy in this
+mode.
 `verify-evidence` provides no insecure mode.
 
 ## 8. Signing and key management
 
-### 8.1 Master seed
+### 8.1 Identity modes and master seed
 
-Locksmith injects exactly one environment variable:
+Canary supports exactly two mutually exclusive signing-identity modes. Stable mode is
+the default and requires Locksmith to inject exactly one environment variable:
 
 ```hcl
 CANARY_MASTER_SEED = env::vault("CANARY_MASTER_SEED")
@@ -342,6 +376,20 @@ committed, logged, returned by an API or reused for another Canary identity.
 
 `canaryctl seed generate` creates it from the operating system CSPRNG for later
 Locksmith encryption.
+
+Ephemeral mode is selected only with the measured daemon argument:
+
+```text
+canaryd --ephemeral-identity
+```
+
+It must fail startup if `CANARY_MASTER_SEED` is also present. On every `canaryd`
+process start, it generates a fresh uniformly random 32-byte master seed through the
+OS CSPRNG inside the process, derives the normal V0 child keys, zeroizes the temporary
+seed and never serializes or persists private material. Entropy failure is fatal.
+Ephemeral mode does not call NSM directly; fresh external Bootproof verification of
+PCR0/1/2 and the signed metadata is what establishes that the current keyset belongs
+to the expected measured enclave workload.
 
 ### 8.2 Deterministic child keys
 
@@ -376,8 +424,12 @@ trade-off is explicit: compromise of the one seed compromises both algorithms.
 Hybrid signatures protect against a future algorithmic break; they do not protect
 against extraction of the shared root secret.
 
-The Locksmith seed persists across redeployments, so signer identity remains stable
-when config changes. `key_epoch` remains `0` in V0; rotation is post-V0.
+The Locksmith seed persists across redeployments, so stable signer identity remains
+unchanged when config changes. Ephemeral identity intentionally changes on every
+process start. `key_epoch` remains `0` in both modes because it identifies the V0 key
+profile, not a monotonic restart counter; the attested `identity_mode` and exact
+`keyset_digest` make the lifecycle and current keyset explicit. Managed stable-key
+rotation remains post-V0.
 
 ### 8.3 Public key set
 
@@ -551,9 +603,9 @@ assumes target names, URLs, PCRs, public keys and attestation evidence are publi
 
 | Route | Owner | Purpose |
 |---|---|---|
-| `GET /` | `canaryd` | Minimal server-rendered multi-target status page |
+| `GET /` | `canaryd` | Guided server-rendered multi-target status and verification page |
 | `GET /health` | `canaryd` | Liveness/readiness; ready only after keys, metadata, migrations and scheduler initialize |
-| `GET /status.json` | `canaryd` | Current state summary for all targets |
+| `GET /status.json` | `canaryd` | Current state summary, runtime-environment hint and executable digest |
 | `GET /targets/{id}/statement` | `canaryd` | Latest hybrid-signed statement |
 | `GET /targets/{id}/evidence` | `canaryd` | Latest raw Bootproof evidence bundle and digest |
 | `GET /targets/{id}/history` | `canaryd` | Bounded current-lifetime observation history |
@@ -564,6 +616,16 @@ assumes target names, URLs, PCRs, public keys and attestation evidence are publi
 
 There are no create/update/delete, manual-probe, authentication, webhook or admin
 routes in V0.
+
+`status.json.runtime.environment` is `nitro_enclave` when `/dev/nsm` exists and
+`non_enclave` otherwise. The page must condition its ready-to-copy verification
+workflow on this server-side value, never on HTTP versus HTTPS. The value is
+self-reported and does not prove enclave execution.
+
+`status.json.runtime.binary_digest` is `sha256:` plus the SHA-256 of the executable
+resolved by `current_exe()` at startup. It identifies the exact daemon bytes for
+correlation, but it is also self-reported and does not replace independently
+reproduced Canary PCR0/1/2 or fresh node attestation.
 
 History-list fields are unsigned diagnostics. The detail route returns the exact
 signed post-attempt statement and, when the response contained decodable attestation
@@ -605,12 +667,12 @@ The root `Containerfile` must:
   output, fixed `SOURCE_DATE_EPOCH`, and remapped source paths.
 - Use pinned Rust dependencies for TLS roots and bundled SQLite; require no dynamic
   runtime libraries.
-- Normalize modes for `canary.json`, Locksmith files and binaries inside a build
+- Normalize modes for `canary.json`, optional Locksmith files and binaries inside a build
   stage, then `COPY --from=`. Do not use final-path `COPY --chmod`.
 - Use the minimal StageX filesystem so `/tmp` exists and is writable.
 - Override the StageX shell entrypoint with `/app/canaryd`.
-- Include `/etc/caution/bundle.json` and `/etc/caution/secrets/*.asc` because
-  `env::vault` enables Locksmith.
+- Include `/etc/caution/bundle.json` and `/etc/caution/secrets/*.asc` together when
+  stable mode uses `env::vault`; require neither in ephemeral mode.
 
 Two clean OCI builds must compare byte-for-byte when exported with normalized
 timestamps. The deployed image must also pass `caution verify`.
@@ -620,9 +682,11 @@ timestamps. The deployed image must also pass `caution verify`.
 The root config uses:
 
 - One enclave and the required `unit "default"` running `/app/canaryd`.
-- The full `containerfile` image; no `build.binary`, because Locksmith files are
-  required in the image.
-- `CANARY_MASTER_SEED = env::vault("CANARY_MASTER_SEED")`.
+- The full `containerfile` image; no `build.binary`, so measured config and optional
+  Locksmith files are preserved.
+- Exactly one identity selection: stable mode uses
+  `CANARY_MASTER_SEED = env::vault("CANARY_MASTER_SEED")`; ephemeral mode uses
+  `args = ["--ephemeral-identity"]` and no `env::vault`.
 - Public application HTTP ingress on the `canaryd` port.
 - A broad TCP/443 egress rule enables Caution's current boolean egress gate; Caution
   does not enforce the rule's destination or port. Target restriction is Canary
@@ -664,10 +728,15 @@ canaryctl capture \
 
 # Repeat 2a or 2b with another unique ID to monitor another enclave.
 
-# 3. Generate the one root seed locally. Never commit .env.
+# 3a. Easiest Caution demo: set the measured daemon argument in caution.hcl.
+#     Do not configure env::vault or package Locksmith artifacts.
+# args = ["--ephemeral-identity"]
+
+# 3b. Or provision a stable identity. Generate the root seed locally.
+#     Never commit .env.
 canaryctl seed generate --env-file .env
 
-# 4. POC-only 1-of-1 Locksmith setup.
+# 4. Stable mode only: POC-only 1-of-1 Locksmith setup.
 caution secret keygen canary.asc \
   --name "Canary POC" --email canary@example.com --shoot-self-in-foot
 export KEYMAKER_URL=https://<keymaker-host>
@@ -678,8 +747,9 @@ caution secret encrypt --env-file .env CANARY_MASTER_SEED
 caution init
 git push caution main
 
-# Reproduce the Canary and save the trusted hashes required by send-shard.
+# Reproduce the Canary and save its trusted hashes.
 caution verify --save-pcrs
+# Stable mode only: release the seed. Ephemeral mode is already running.
 caution secret send-shard --keyring canary.private.asc
 
 # 6. Attest the Canary once and enroll its exact public signing keys.
@@ -702,10 +772,10 @@ canaryctl verify-statement \
   --keys canary-keys.json
 ```
 
-Never commit `.env` or the unencrypted private keyring. Committing
-`.caution/deployment.json`, `.caution/quorum-bundle.json`, encrypted
-`.caution/secrets/`, `canary.json`, `Containerfile`, `caution.hcl` and `Cargo.lock` is
-expected for the POC.
+Never commit `.env` or the unencrypted private keyring. Both modes commit
+`.caution/deployment.json`, `canary.json`, `Containerfile`, `caution.hcl` and
+`Cargo.lock`. Stable mode additionally commits `.caution/quorum-bundle.json` and the
+encrypted `.caution/secrets/`; ephemeral mode requires neither.
 
 ## 16. V0 implementation phases
 
@@ -735,7 +805,8 @@ verifiable evidence and hybrid statements.
 ### Phase 3 — Usable Caution enclave POC
 
 - Finish the digest-pinned StageX Containerfile and `caution.hcl`.
-- Package Locksmith bundle/secrets correctly and deploy with one master seed.
+- Support both a Locksmith-backed stable identity and an explicitly selected
+  Locksmith-free ephemeral identity in the same reproducible build recipe.
 - Deploy one Canary monitoring at least two distinct Caution target endpoints.
 - Run `caution verify` for the Canary and preferred-flow targets.
 - Demonstrate TOFU enrollment separately and visibly label its weaker guarantee.
@@ -761,9 +832,10 @@ signatures without access to Caution internals.
 8. A fresh Canary attestation binds the measured config digest and the served keyset
    digest; absent or mismatched metadata is rejected.
 9. A config edit requires redeployment and changes the Canary measurement/config
-   digest while the Locksmith-derived signer identity remains stable.
-10. Enclave restart wipes SQLite history, returns targets to `PENDING`, and triggers
-    immediate probes.
+   digest. Stable mode retains the Locksmith-derived signer; ephemeral mode produces a
+   new signer at the next process start.
+10. Enclave restart wipes SQLite history, returns targets to `PENDING`, triggers
+    immediate probes, and causes an old ephemeral key pin to fail closed.
 11. SSRF tests reject prohibited addresses, redirects, oversized bodies and DNS
     rebinding.
 12. Source and dependency review finds no direct NSM/Nitro attestation-generation
@@ -772,6 +844,12 @@ signatures without access to Caution internals.
     `caution verify`.
 14. README and CLI confirmation explicitly call live PCR capture TOFU and make no
     source-reproduction claim.
+15. The UI lists monitored targets before verification guidance, displays the exact
+    executable SHA-256, and selects attested versus TOFU instructions from the local
+    NSM-device hint while explicitly denying that the hint is remote proof.
+16. Fresh signed node metadata labels `identity_mode`; ephemeral startup rejects a
+    simultaneous `CANARY_MASTER_SEED`, generates distinct keysets across starts and
+    requires no Locksmith artifacts or shard release.
 
 ## 18. Explicit non-goals and upgrade path
 

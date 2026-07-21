@@ -28,7 +28,7 @@ use tokio::sync::RwLock;
 
 use crate::{
     html::{render_status_page, UI_SCRIPT},
-    model::{HistoryEntry, RuntimeSnapshot, TargetSnapshot},
+    model::{HistoryEntry, RuntimeIdentity, RuntimeSnapshot, TargetSnapshot},
     store::Store,
 };
 
@@ -348,6 +348,7 @@ struct StatusResponse {
     protocol: String,
     node_id: String,
     config_digest: String,
+    runtime: RuntimeIdentity,
     generated_at: chrono::DateTime<chrono::Utc>,
     targets: Vec<TargetSummary>,
 }
@@ -358,6 +359,7 @@ impl From<RuntimeSnapshot> for StatusResponse {
             protocol: snapshot.protocol,
             node_id: snapshot.node_id,
             config_digest: snapshot.config_digest,
+            runtime: snapshot.runtime,
             generated_at: snapshot.generated_at,
             targets: snapshot.targets.iter().map(TargetSummary::from).collect(),
         }
@@ -418,7 +420,9 @@ mod tests {
     use tower::ServiceExt as _;
 
     use crate::{
-        model::{AttemptWrite, RuntimeSnapshot, TargetSnapshot},
+        model::{
+            AttemptWrite, ExecutionEnvironment, RuntimeIdentity, RuntimeSnapshot, TargetSnapshot,
+        },
         store::Store,
     };
 
@@ -523,10 +527,22 @@ mod tests {
     }
 
     fn snapshot(target: TargetSnapshot) -> RuntimeSnapshot {
+        snapshot_with_environment(target, ExecutionEnvironment::NonEnclave)
+    }
+
+    fn snapshot_with_environment(
+        target: TargetSnapshot,
+        environment: ExecutionEnvironment,
+    ) -> RuntimeSnapshot {
         RuntimeSnapshot {
             protocol: "caution-canary-v0".to_owned(),
             node_id: "node-a".to_owned(),
             config_digest: config().config_digest,
+            runtime: RuntimeIdentity {
+                environment,
+                binary_digest: digest('d'),
+                identity_mode: canary_core::node::IdentityMode::Stable,
+            },
             generated_at: at(0),
             targets: vec![target],
         }
@@ -586,6 +602,9 @@ mod tests {
         assert_eq!(headers[header::CONTENT_TYPE], "application/json");
         assert_eq!(headers[header::CACHE_CONTROL], "no-store");
         let status_json: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status_json["runtime"]["environment"], "non_enclave");
+        assert_eq!(status_json["runtime"]["binary_digest"], digest('d'));
+        assert_eq!(status_json["runtime"]["identity_mode"], "stable");
         assert!(status_json["targets"][0].get("statement").is_none());
         assert!(status_json["targets"][0].get("evidence").is_none());
 
@@ -626,6 +645,8 @@ mod tests {
         assert!(script.contains("canaryctl verify"));
         assert!(script.contains("canaryctl verify-history"));
         assert!(script.contains("--insecure"));
+        assert!(script.contains("runtimeEnvironment"));
+        assert!(!script.contains("window.location.protocol"));
         assert!(script.contains("requestJson(targetPath(name))"));
         assert!(!script.contains("innerHTML"));
 
@@ -783,12 +804,61 @@ mod tests {
         assert!(page.contains("The underlying proof material"));
         assert!(page.contains("unsigned diagnostic data"));
         assert!(page.contains("canaryctl verify"));
+        assert!(page.contains("canaryctl inspect-node"));
+        assert!(page.contains("data-runtime-environment=\"non_enclave\""));
+        assert!(page.contains("data-identity-mode=\"stable\""));
+        assert!(page.contains("Non-enclave runtime detected"));
+        assert!(page.contains("initial signing-key enrollment explicit trust on first use"));
+        assert!(
+            page.find("Monitored targets").unwrap() < page.find("Verify independently").unwrap()
+        );
+        assert!(!page.contains("Continuity monitor / V0"));
         assert!(page.contains("--success: #5cff9d"));
         assert!(page.contains("class=\"target-card status-verified\""));
         assert!(page.contains("class=\"status-badge\""));
         assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;"));
         assert!(page.contains("Raw Nitro evidence can expose infrastructure metadata"));
         assert!(page.contains("&quot;&lt;&amp;&#x27;"));
+    }
+
+    #[tokio::test]
+    async fn html_uses_attested_workflow_when_nitro_is_detected() {
+        let state = state(true).await;
+        state
+            .publish(snapshot_with_environment(
+                target(Some(evidence())),
+                ExecutionEnvironment::NitroEnclave,
+            ))
+            .await;
+        state.set_ready(true);
+
+        let (status, _, body) = response(router(state), "/").await;
+        assert_eq!(status, StatusCode::OK);
+        let page = String::from_utf8(body).unwrap();
+        assert!(page.contains("data-runtime-environment=\"nitro_enclave\""));
+        assert!(page.contains("Nitro enclave detected"));
+        assert!(page.contains("caution verify --save-pcrs"));
+        assert!(page.contains("--pcrs-file .caution/trusted_hashes.json"));
+        assert!(page.contains("canaryd / sha256:"));
+        assert!(!page.contains("No Nitro device is visible"));
+    }
+
+    #[tokio::test]
+    async fn html_labels_ephemeral_identity_and_restart_semantics() {
+        let state = state(true).await;
+        let mut snapshot =
+            snapshot_with_environment(target(Some(evidence())), ExecutionEnvironment::NitroEnclave);
+        snapshot.runtime.identity_mode = canary_core::node::IdentityMode::Ephemeral;
+        state.publish(snapshot).await;
+        state.set_ready(true);
+
+        let (status, _, body) = response(router(state), "/").await;
+        assert_eq!(status, StatusCode::OK);
+        let page = String::from_utf8(body).unwrap();
+        assert!(page.contains("data-identity-mode=\"ephemeral\""));
+        assert!(page.contains("Ephemeral identity"));
+        assert!(page.contains("change on restart"));
+        assert!(page.contains("re-enroll a new key file"));
     }
 
     #[test]

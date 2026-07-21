@@ -4,57 +4,35 @@ Canary continuously checks public Caution/Bootproof attestation endpoints. It
 compares fresh nonce-bound AWS Nitro evidence with configured PCR0/1/2 values and
 publishes short-lived statements signed with Ed25519 and ML-DSA-65.
 
-Canary supports 1–100 targets. It serves a public status page and JSON API on port
-8080.
+Canary supports 1–100 targets and serves a public status page and JSON API on port
+8080. A `VERIFIED` target means fresh Nitro evidence matched that target's configured
+PCR0/1/2. It does not prove application correctness or cover replicas that were not
+configured as targets; configure each replica endpoint when every replica matters.
+
+## Choose a workflow
+
+| Mode | Canary trust | Intended use |
+|---|---|---|
+| Caution deployment | Fresh Canary attestation, independently reproduced Canary PCR0/1/2, and attested config and signing keys | Production verification |
+| Local Docker | Explicit TOFU pin of the initial signer and an unattested local config | Development and evaluation |
+
+Both modes verify hybrid-signed statements and replay their linked target evidence
+against the configured target PCR policy. Local mode proves continuity with the
+signer enrolled on first use; it does not authenticate the initial signer,
+configuration, target PCR policy, or running Canary workload.
 
 ## Requirements
 
 - Rust 1.88 or newer to build `canaryctl`.
-- Docker with BuildKit and linux/amd64 support for the local image.
 - One or more publicly reachable HTTPS Bootproof `/attestation` endpoints.
+- For local use: Docker with BuildKit and linux/amd64 support.
 - For Caution deployment: the Caution CLI and account, a public source repository,
   and a public DNS name. Stable identity additionally requires a Keymaker URL and
   Locksmith shard-holder keyring; ephemeral identity does not.
 
 The StageX image is linux/amd64. Docker Desktop can emulate it on Apple Silicon.
 
-## Start with the status UI
-
-Once Canary is running, open its root URL first:
-
-```text
-https://canary.example.com/
-```
-
-The dashboard is the guided entry point. Select **Inspect** on any target to see:
-
-- The monitored targets and their current server-side results before any explanatory
-  material.
-- The current target state and what the badge does—and does not—prove.
-- The hybrid-signed **statement**, which records Canary's conclusion.
-- The linked **evidence**, which is the raw nonce-bound Nitro proof Canary evaluated.
-- Process-lifetime **history** summaries plus the exact retained artifacts for each
-  decodable attempt.
-- Ready-to-copy `canaryctl verify` and `verify-history` commands for independent
-  local verification.
-
-The page reports `nitro_enclave` when `/dev/nsm` is visible to `canaryd`, otherwise
-`non_enclave`, and shows the matching verification workflow. This is a local runtime
-hint, not cryptographic proof: an untrusted process can lie about its environment.
-Only the external `canaryctl` flow with a fresh attestation and independently
-reproduced PCRs proves that a Caution-hosted Canary is running in the expected
-enclave.
-
-The header also shows `sha256:<hex>` for the exact running `canaryd` executable. It is
-useful for build/runtime correlation but is self-reported and is not a replacement
-for the Canary deployment PCR0/1/2, which measure the complete enclave image and boot
-chain.
-
-The original JSON endpoints remain linked throughout the UI. The page itself does not
-perform browser-side cryptographic verification; use the displayed `canaryctl` command
-to verify the Canary node, statement, and evidence chain locally.
-
-## Build the operator CLI
+## Install `canaryctl`
 
 ```sh
 cargo build --release --locked -p canaryctl
@@ -68,7 +46,7 @@ export PATH="$PWD/target/release:$PATH"
 `canary.json` contains a stable ID for this Canary and the expected PCR0/1/2 values
 for every target. Create it with one of the following enrollment methods.
 
-### Independently reproduced PCRs
+### Preferred: independently reproduced target PCRs
 
 Use `caution verify` to reproduce the target and save its PCRs, then add the target:
 
@@ -119,12 +97,11 @@ The generated `canary.json` also carries global runtime policy. For example:
 Edit `probe_interval_seconds` to change the cadence for every target. It defaults to
 60 seconds and accepts 6–86,400. The example uses two minutes. Claims still expire
 after 180 seconds, so long intervals intentionally leave targets `STALE` between
-probes. `history_limit` is the retained and returned row count per target; it defaults
-to 1,000 and accepts 1–10,000. Both fields are measured policy included in
-`config_digest`; changing either requires a restart locally or a rebuild/redeploy on
-Caution.
+probes. `history_limit` is the retained row count per target; it defaults to 1,000 and
+accepts 1–10,000. Changing either field requires a restart locally or a
+rebuild/redeploy on Caution.
 
-### Trust on first use
+### Target PCR trust on first use
 
 This path needs no Caution account. It records the PCRs returned by the live target
 after interactive confirmation:
@@ -146,7 +123,9 @@ URLs must use HTTPS, and every PCR must be a nonzero lowercase 96-character
 SHA-384 hex value. Canary rejects target DNS answers for loopback, private,
 link-local, multicast, and other non-public address ranges.
 
-## Run locally with Docker, without Caution
+## Run Canary
+
+### Local Docker
 
 Generate a development seed, build the local image target, and run it with the
 configuration mounted read-only:
@@ -177,19 +156,15 @@ curl -fsS http://localhost:8080/health
 curl -fsS http://localhost:8080/status.json
 ```
 
-The status page is at <http://localhost:8080/>. The local container probes and
-verifies configured targets, but it does not expose its own `/attestation` endpoint;
-Caution adds that endpoint through Bootproofd. The page reports `non_enclave` and
-offers the explicit `--insecure` TOFU workflow even if a local reverse proxy happens
-to serve it over HTTPS.
+The status page is at <http://localhost:8080/>. Local Docker has no Canary attestation
+endpoint, so verification uses the explicit `--insecure` TOFU workflow below.
 
-The local SQLite database is `/tmp/canary/canary.sqlite3` and is discarded with the
-container. Never commit `.env`: it contains the root seed for this Canary's signing
-keys.
+Local history is discarded with the container. Never commit `.env`: it contains the
+root seed for this Canary's signing keys.
 
-## Deploy on Caution
+### Caution deployment
 
-### 1. Create the deployment configuration
+#### 1. Create the deployment configuration
 
 ```sh
 cp caution.hcl.template caution.hcl
@@ -201,18 +176,16 @@ Canary itself; monitored targets remain in `canary.json`. Then choose exactly on
 identity mode:
 
 - **Ephemeral identity** — easiest for demos and disposable monitors. Replace the
-  template's `env` block with `args = ["--ephemeral-identity"]`. Canary generates its
-  signing seed with the OS CSPRNG inside `canaryd`, keeps private material only in
-  memory, and starts without Locksmith. Every process restart creates new keys.
+  template's `env` block with `args = ["--ephemeral-identity"]`. It needs no Locksmith,
+  but every process restart creates new signing keys.
 - **Stable identity** — keep the template's `env::vault("CANARY_MASTER_SEED")` block
-  and complete the Locksmith steps below. The same seed preserves the signer across
-  restarts and redeployments.
+  and complete the Locksmith steps below. It preserves the signer across restarts and
+  redeployments.
 
 The daemon rejects `--ephemeral-identity` when `CANARY_MASTER_SEED` is also present.
-The selected command and Locksmith inclusion are part of the reproduced Caution
-deployment, so changing modes changes the Canary PCRs.
+Changing identity mode requires a rebuild/redeploy and new Canary PCRs.
 
-### 2. Authenticate and initialize
+#### 2. Authenticate and initialize
 
 First-time accounts register with an access code. Existing accounts log in:
 
@@ -227,7 +200,7 @@ caution init
 `caution init` validates `caution.hcl`, creates `.caution/deployment.json`, and adds
 the `caution` Git remote.
 
-### 3. Optional: provision the stable identity with Locksmith
+#### 3. Optional: provision the stable identity with Locksmith
 
 Skip this section for ephemeral identity.
 
@@ -250,7 +223,7 @@ certificate needs signing, encryption, and authentication subkeys. See the
 [Caution key services guide](https://docs.caution.co/concepts/key-services/) for
 production shard-holder setup. Do not commit `.env` or private keyrings.
 
-### 4. Commit and deploy
+#### 4. Commit and deploy
 
 For ephemeral identity, commit only the measured configuration and deployment metadata:
 
@@ -274,7 +247,7 @@ From a non-`main` local branch, use `git push caution HEAD:main`. The Git push i
 the deployment action; `caution apps build` only builds an image for local
 inspection.
 
-### 5. Verify, then release the stable seed if applicable
+#### 5. Verify, then release the stable seed if applicable
 
 ```sh
 caution verify --save-pcrs
@@ -285,13 +258,24 @@ identity, each authorized shard holder runs `caution secret send-shard` until th
 quorum is met; Canary then starts after Locksmith releases `CANARY_MASTER_SEED` inside
 the enclave.
 
-Inside AWS Nitro, `/dev/nsm` is visible and the page offers the attested PCR-based
-workflow. That display choice remains only a hint; the verifier outside the enclave
-establishes the actual guarantee.
+## Inspect the status UI
 
-## Verify a deployed Canary
+Open the root URL after Canary starts:
 
-### Caution deployment: measured key enrollment, then full verification
+```text
+https://canary.example.com/
+```
+
+For local Docker, use <http://localhost:8080/>. The dashboard shows every target's
+current state. Select **Inspect** to view its hybrid-signed statement, linked raw
+evidence, process-lifetime history, retained artifacts, and ready-to-copy verification
+commands.
+
+Treat the UI as status only; use `canaryctl` for independent verification.
+
+## Verify independently
+
+### Caution deployment
 
 Before running `verify`, obtain the two explicit trust inputs: independently
 reproduced PCR0/1/2 for the **Canary deployment itself**, and the Canary public keys
@@ -303,9 +287,7 @@ First reproduce the node PCRs:
 caution verify --save-pcrs
 ```
 
-Then create `canary-keys.json`. This performs a fresh nonce-bound Canary
-attestation, checks it against those PCRs, checks the attested config, keyset digest
-and identity mode, and atomically saves the exact canonical public-key document:
+Then authenticate and save the Canary public keys:
 
 ```sh
 canaryctl inspect-node \
@@ -332,35 +314,16 @@ canaryctl verify \
 Add `--target payments-prod` to select one target; repeat it to select several. With no
 selection, every target in the attested config is verified.
 
-`verify` performs the following checks in order:
-
-1. Fresh Canary AWS/Nitro chain, COSE signature, certificate time, nonce and exact
-   Canary PCR0/1/2.
-2. Attested `config_digest`, `keyset_digest`, node ID, key epoch and identity mode
-   against the live canonical documents.
-3. Exact live keyset equality with the operator-enrolled `--keys` file.
-4. Both Ed25519 and ML-DSA-65 signatures on each current Canary statement, plus
-   statement freshness, target origin, node identity and config-digest binding.
-5. Exact statement-to-evidence digest and observation-time binding, followed by local
-   replay of the target Nitro chain, signature, nonce and target PCR0/1/2 policy.
-
-Canary signs the **statement**, not the evidence bytes directly. The statement contains
-the evidence digest and observation time, which prevents substituting another evidence
-bundle. Any missing signature, stale statement, key/config mismatch, evidence mismatch,
-negative target result or unverifiable target exits non-zero.
-
-This proves that the current endpoint is serving a freshly attested Canary enclave
-with the independently expected deployment measurements; that the served config and
-signing keys are bound into that attestation; and that every selected target result is
-hybrid-signed and linked to locally replayed target evidence. It does not prove
-application correctness, cover replicas that were not configured as targets, or turn
-the page's executable hash into an independent trust root.
+`verify` checks the Canary against the expected deployment PCRs and enrolled keys,
+requires both statement signatures, and independently replays each statement's linked
+target evidence. Any stale, negative, mismatched, or unverifiable result exits
+non-zero.
 
 For ephemeral identity this authenticates the **current process keyset**, not a durable
 deployment identity. Do not put multiple ephemeral Canary replicas behind one URL:
 each process has different keys and a verifier can receive inconsistent documents.
 
-### Non-Caution development: explicit TOFU key enrollment and continuity
+### Local Docker: TOFU key enrollment
 
 There is no Canary attestation outside Caution. Enroll the initially observed keyset
 once, explicitly as TOFU:
@@ -390,123 +353,31 @@ The `--insecure` flag also permits HTTP and deliberately skips only Canary's own
 attestation; it does not disable statement signature, evidence-link, target Nitro, or
 target PCR verification.
 
-### Reading `canaryctl verify` output
+### Result meanings
 
 `verify` is a one-shot verification of each target's **current published signed
 claim**. It is not necessarily the latest network attempt: a transport failure may
 leave the previous definitive claim current while that evidence remains fresh. The
-signed observation, issuance and expiry times below identify exactly what was checked.
-These are Canary-signed freshness fields, not an independent timestamp-authority
-proof. Multiple targets are fetched and checked independently rather than as one
-atomic aggregate snapshot. Use `verify-history` to replay one specific completed
-attempt.
+signed observation, issuance, and expiry times identify exactly what was checked;
+they are not independent timestamp-authority proof. Multiple targets are verified
+independently, not as one atomic snapshot.
 
-A successful development run looks like this:
+| Result | Meaning |
+|---|---|
+| `PASS — FULL ATTESTED CHAIN VERIFIED` | Canary measurements, attested config and keys, current statements, and linked target evidence verified |
+| `PASS — VERIFIED AGAINST TOFU SIGNER + UNATTESTED CONFIG` | Chain verified against the pinned development signer and its unauthenticated policy |
+| `AUTHENTICATED_NEGATIVE` | Canary trust chain is valid, but at least one signed target state is not `VERIFIED` |
+| `SIGNED_NEGATIVE` | Equivalent negative result under the TOFU signer |
+| `ERROR` | A required artifact could not be fetched, parsed, matched, or verified |
 
-```text
-CANARY VERIFY
-  Scope                   CURRENT PUBLISHED CLAIMS
-  Started at              2026-07-21T15:02:14Z
-  Targets                 ALL CONFIGURED (1)
+Only the two `PASS` results exit zero. Stable deployments report `STABLE — EXTERNAL
+SEED`; ephemeral deployments report `EPHEMERAL — CURRENT PROCESS` and warn that a
+restart creates new keys. Local mode reports its unattested configuration and unknown
+identity lifecycle explicitly.
 
-CANARY NODE
-  Trust mode              DEVELOPMENT / TOFU
-  Canary attestation      SKIPPED — --insecure
-  Canary workload PCRs    NOT VERIFIED
-  Transport policy        HTTP ALLOWED
-  Config authenticity     NOT VERIFIED — SELF-CONSISTENT ONLY
-  Signing keys            NOT ATTESTED — TOFU PIN
-  Identity lifecycle      UNKNOWN — UNATTESTED
-  Pinned key continuity   PASS
-  Pinned keys             canary-keys.json
-  Node ID                 caution-canary-demo
-  Config digest           sha256:000fabc4d0353229f9ea9e6e9c48da1dcf1b2095307171b0622e88cf657eeb21
-  Keyset digest           sha256:14f692fc0b6cbb42ecab1760f9f6439712517365ee40ec6394d468ee314be0bd
+### Offline artifact verification
 
-TARGET pq-demo
-  Claim                   CURRENT PUBLISHED
-  Target origin           https://pq-ceremony.example
-  PCR policy source       UNATTESTED CONFIG — TOFU SIGNER
-  Checked at              2026-07-21T15:02:14Z
-  Evidence observed at    2026-07-21T15:01:53Z
-  Statement issued at     2026-07-21T15:01:54Z
-  Statement expires at    2026-07-21T15:04:53Z
-  Statement signatures    PASS — ED25519 + ML-DSA-65
-  Statement freshness     PASS AT CHECKED TIME
-  Statement/config binding PASS
-  Statement/evidence link PASS — sha256:...
-  Evidence replay         PASS AT OBSERVED TIME
-  Target Nitro + PCRs     PASS
-  Signed status           VERIFIED
-  Signed reason           ALL_CHECKS_PASSED
-
-RESULT: PASS — VERIFIED AGAINST TOFU SIGNER + UNATTESTED CONFIG
-```
-
-The important fields are:
-
-- **Canary workload PCRs**: whether a fresh Canary attestation matched independently
-  reproduced PCR0/1/2. This is deliberately absent in development mode.
-- **Config authenticity**: in Caution mode, the image measurement covers the embedded
-  `canary.json` and fresh attestation binds its parsed `config_digest`. In development
-  mode the digest only proves internal consistency.
-- **PCR policy source**: whether the target PCR0/1/2 policy came from that measured and
-  attested config or from an unauthenticated development config.
-- **Statement signatures**: both Ed25519 and ML-DSA-65 signatures over the canonical
-  statement payload were required; one valid signature is insufficient.
-- **Statement freshness**: the signed envelope was checked against the CLI's clock and
-  is inside its issuance/expiry window. This does not turn a signed `STALE` target
-  status into `VERIFIED`.
-- **Statement/evidence link**: the signed statement's evidence digest and observation
-  time matched the exact evidence bundle fetched by the CLI.
-- **Evidence replay**: Nitro verification was rerun at the signed observation time so
-  the certificate/document is evaluated at the time it was captured.
-- **Target Nitro + PCRs**: the combined Bootproof verifier accepted the AWS chain,
-  COSE signature, nonce and configured target PCR0/1/2. The CLI intentionally reports
-  this combined result rather than inventing unsupported per-subcheck output.
-
-In an attested Caution run, the node and final lines instead read:
-
-```text
-CANARY NODE
-  Trust mode              ATTESTED
-  Canary attestation      PASS — FRESH NONCE-BOUND
-  Canary workload PCRs    PASS — PCR0/1/2
-  Expected Canary PCRs    .caution/trusted_hashes.json
-  Transport policy        HTTPS ONLY
-  Config authenticity     PASS — MEASURED + ATTESTED
-  Signing keys            PASS — ATTESTED KEYSET
-  Identity lifecycle      STABLE — EXTERNAL SEED
-  Pinned key continuity   PASS
-  ...
-
-TARGET pq-demo
-  PCR policy source       MEASURED + ATTESTED CONFIG
-  ...
-
-RESULT: PASS — FULL ATTESTED CHAIN VERIFIED
-```
-
-An ephemeral deployment instead prints `EPHEMERAL — CURRENT PROCESS`, reports that a
-restart creates new keys, and still exits successfully while the enrolled pin matches
-that process.
-
-Exit/result meanings:
-
-- `PASS — FULL ATTESTED CHAIN VERIFIED`: the Canary identity, measured config,
-  signing keys, current statements and linked target evidence all verified.
-- `PASS — VERIFIED AGAINST TOFU SIGNER + UNATTESTED CONFIG`: the cryptographic chain
-  is consistent with the pinned development signer and its policy, but neither is an
-  independently authenticated trust root.
-- `AUTHENTICATED_NEGATIVE`: the attested Canary chain is valid, but at least one
-  signed current target state is not `VERIFIED`.
-- `SIGNED_NEGATIVE`: the same negative result under the TOFU development signer.
-- `ERROR`: a required chain link could not be fetched, parsed, matched or verified.
-
-Only the two `PASS` results exit zero; the development result must be interpreted with
-its explicit trust limitation.
-
-Then the offline commands can verify a downloaded target statement and evidence:
+Verify a downloaded target statement and evidence:
 
 ```sh
 curl -fsS https://canary.example.com/targets/payments-prod/statement -o statement.json
@@ -526,8 +397,10 @@ canaryctl verify-evidence \
 require exactly one of `--pcrs-file` or explicit demo-only `--insecure`; there is no
 implicit trust downgrade.
 
-To investigate a past probe, take its numeric ID from the history endpoint (or
-the UI's History tab) and replay the exact retained statement and evidence:
+### Historical replay
+
+Take the attempt ID from the history endpoint or UI and replay its retained statement
+and evidence:
 
 ```sh
 canaryctl verify-history \
@@ -538,24 +411,20 @@ canaryctl verify-history \
   --attempt 42
 ```
 
-This verifies the historical statement as of its signed issuance time, checks it
-against the currently attested Canary config and keys, and reruns the retained
-nonce-bound target evidence at its recorded observation time. A reproduced negative
-result such as `INVALID_SIGNATURE` is a successful forensic replay, not a healthy
-target result. The attempt timestamp and other history summary fields remain unsigned.
-Transport failures and responses without a decodable attestation document have no
-target evidence to replay.
+This verifies the retained artifacts at their recorded times. Reproducing a negative
+result confirms the historical record; it does not make the target healthy. Attempts
+without decodable evidence cannot be replayed.
 
-## HTTP API
+## Useful HTTP endpoints
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /` | Multi-target status page |
 | `GET /health` | Liveness and readiness |
-| `GET /status.json` | Current state for every target plus runtime environment and binary digest |
+| `GET /status.json` | Current state for every target |
 | `GET /targets/{id}/statement` | Latest hybrid-signed statement |
 | `GET /targets/{id}/evidence` | Latest Bootproof evidence bundle |
-| `GET /targets/{id}/history` | Up to configured `history_limit` observations; default 1,000 |
+| `GET /targets/{id}/history` | Retained target observations |
 | `GET /targets/{id}/history/{attempt_id}` | Exact retained statement and evidence for local replay |
 | `GET /config.json` | Measured target configuration and digest |
 | `GET /keys.json` | Ed25519 and ML-DSA-65 public keys |
@@ -563,75 +432,18 @@ target evidence to replay.
 All endpoints are public. Treat target names, URLs, PCRs, keys, and evidence as
 public information.
 
-`status.json.runtime.environment` is either `nitro_enclave` or `non_enclave`, based
-on local `/dev/nsm` availability. `status.json.runtime.binary_digest` is the SHA-256
-of the executable file opened through `current_exe()` at startup.
-`status.json.runtime.identity_mode` is `stable` or `ephemeral`. These fields are
-self-reported status metadata. The identity mode is independently trustworthy only
-when the same value is checked in fresh signed node metadata; none of these status
-fields substitutes for fresh attestation and expected PCR verification.
+## Operational notes
 
-### `config_digest` and signed outputs
-
-`config_digest` is `sha256:` plus the SHA-256 of the RFC 8785 canonical form of the
-fully parsed `canary.json`, including defaulted global settings. It prevents a result
-from being moved between different target policies or runtime configurations.
-
-For a Caution deployment, `canary.json` is copied into the enclave image before its
-PCRs are produced, so independently reproduced Canary PCR0/1/2 cover the configuration
-file as part of the complete image. At runtime, canaryd separately calculates
-`config_digest` from the parsed/defaulted configuration and writes it into
-`/metadata.json`; Bootproofd places that metadata in signed Nitro `user_data`.
-`inspect-node` checks that this attested digest equals the exact canonical
-`/config.json` served to the verifier. The PCR measurement and `config_digest` are
-complementary bindings, not two representations of the same hash.
-
-```sh
-curl -fsS https://canary.example.com/config.json
-curl -fsS https://canary.example.com/status.json
-curl -fsS https://canary.example.com/targets/payments-prod/statement
-curl -fsS https://canary.example.com/targets/payments-prod/evidence
-curl -fsS https://canary.example.com/targets/payments-prod/history
-curl -fsS https://canary.example.com/keys.json
-```
-
-- `/config.json` and `/status.json` expose the current `config_digest`, but those JSON
-  responses are not independently signed.
-- `/targets/{id}/statement` carries `payload.config_digest`; the entire payload is
-  signed with both Ed25519 and ML-DSA-65.
-- History rows carry the digest for correlation but remain unsigned. A history-detail
-  response also returns the exact signed statement and retained evidence, which must
-  be verified with `canaryctl verify-history` before it is trusted.
-- Evidence does not duplicate `config_digest`. Its digest and observation time are
-  bound by the signed statement, which is in turn bound to the config digest.
-- `/keys.json` has no config digest. Its exact keyset digest and the config digest are
-  jointly bound into the fresh Canary Nitro attestation.
-
-Therefore no extra config signature is needed: `canaryctl verify` checks the fresh
-node attestation, config/key bindings, signed statement, and linked evidence as one
-chain. Raw `curl` output alone is diagnostic and should not be treated as verified.
-
-## Runtime behavior and limits
-
-- Targets are probed immediately, then every configured `probe_interval_seconds`
-  (default 60) with 0–5 seconds of jitter. At most eight probes run concurrently;
-  each attempt times out after 15 seconds.
-- A definitive result is valid for 180 seconds. Transport failures can preserve a
-  still-valid result with a warning; successful verification recovers immediately.
-- Every process start publishes fresh `PENDING` statements and probes immediately.
-  Existing history remains only if the same SQLite database remains available.
-  Replacing the container or enclave discards `/tmp` history.
-- Stable mode re-derives the same signing keys from `CANARY_MASTER_SEED`. Ephemeral
-  mode generates new keys on every process start, so previously enrolled live-verifier
-  pins fail closed until the operator enrolls a new output file.
+- Targets are probed immediately, then every `probe_interval_seconds` (default 60).
+  Results expire after 180 seconds.
+- History is process-local and is lost when the container or enclave is replaced.
+- Ephemeral identity creates new keys on restart; enroll the new keyset before live
+  verification resumes.
 - A local bind-mounted `canary.json` change requires a container restart. A Caution
   deployment embeds the file, so changing it requires rebuilding and redeploying.
 - Canary has no durable storage, mutable configuration API, alerts, webhooks,
   timestamp authority, automatic replica discovery, or application traffic-path
   binding.
-- A `VERIFIED` result means fresh Nitro evidence matched the configured PCR0/1/2.
-  It does not prove application correctness or that all load-balanced replicas were
-  observed. Configure each replica endpoint when each replica must be covered.
 
 ## License
 

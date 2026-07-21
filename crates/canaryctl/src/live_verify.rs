@@ -19,12 +19,11 @@ const SNAPSHOT_RETRIES: usize = 3;
 
 pub fn run(
     base_url: &str,
-    pcrs_file: Option<&Path>,
-    insecure: bool,
+    pcrs_file: &Path,
     requested_targets: &[String],
     keys_out: Option<&Path>,
 ) -> Result<()> {
-    let node = inspect::inspect(base_url, pcrs_file, insecure)?;
+    let node = inspect::inspect(base_url, pcrs_file)?;
     print_node_report(&node);
     let targets = select_targets(&node.config, requested_targets)?;
     let mut authenticated_negative = false;
@@ -57,11 +56,7 @@ pub fn run(
         node.write_keys(path)?;
         println!("\nKeys written: {}", path.display());
     }
-    if insecure {
-        println!("\nRESULT: PASS (INSECURE NODE IDENTITY)");
-    } else {
-        println!("\nRESULT: PASS");
-    }
+    println!("\nRESULT: PASS");
     Ok(())
 }
 
@@ -276,13 +271,8 @@ fn verify_statement_binding(
 fn print_node_report(node: &InspectedNode) {
     println!("CANARY NODE");
     println!("  Nitro attestation       PASS");
-    if node.insecure {
-        println!("  Canary PCR identity     INSECURE / SELF-REPORTED");
-        println!("  Transport policy        INSECURE / HTTP ALLOWED");
-    } else {
-        println!("  Canary PCR identity     PASS");
-        println!("  Transport policy        HTTPS ONLY");
-    }
+    println!("  Canary PCR identity     PASS");
+    println!("  Transport policy        HTTPS ONLY");
     println!("  Config binding          PASS");
     println!("  Signing-key binding     PASS");
     println!("  Node ID                 {}", node.metadata.node_id);

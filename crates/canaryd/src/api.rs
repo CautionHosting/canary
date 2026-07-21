@@ -27,7 +27,7 @@ use serde::Serialize;
 use tokio::sync::RwLock;
 
 use crate::{
-    html::render_status_page,
+    html::{render_status_page, UI_SCRIPT},
     model::{HistoryEntry, RuntimeSnapshot, TargetSnapshot},
     store::Store,
 };
@@ -102,6 +102,7 @@ pub enum ApiStateError {
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/ui.js", get(ui_script))
         .route("/health", get(health))
         .route("/status.json", get(status))
         .route("/targets/{id}/statement", get(statement))
@@ -140,6 +141,16 @@ async fn index(State(state): State<ApiState>) -> Response {
     }
     let snapshot = state.snapshot().await;
     html_response(render_status_page(&snapshot))
+}
+
+async fn ui_script() -> Response {
+    let mut response = Response::new(Body::from(UI_SCRIPT));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/javascript; charset=utf-8"),
+    );
+    response
 }
 
 async fn status(State(state): State<ApiState>) -> Response {
@@ -266,6 +277,16 @@ fn html_response(value: String) -> Response {
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+        ),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
     );
     response
 }
@@ -553,6 +574,17 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, expected_keys);
 
+        let (status, headers, body) = response(router(state.clone()), "/ui.js").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers[header::CONTENT_TYPE],
+            "text/javascript; charset=utf-8"
+        );
+        let script = String::from_utf8(body).unwrap();
+        assert!(script.contains("canaryctl verify"));
+        assert!(script.contains("requestJson(targetPath(name))"));
+        assert!(!script.contains("innerHTML"));
+
         let (status, _, body) = response(router(state), "/health").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, br#"{"status":"ok"}"#);
@@ -652,10 +684,21 @@ mod tests {
         let (status, headers, body) = response(router(state), "/").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert!(headers[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("script-src 'self'"));
+        assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
         let page = String::from_utf8(body).unwrap();
         assert!(!page.contains("<img src=x"));
-        assert!(!page.contains("<script>"));
+        assert!(!page.contains("<script>alert"));
         assert!(page.contains("<meta name=\"viewport\""));
+        assert!(page.contains("<script src=\"/ui.js\" defer></script>"));
+        assert!(page.contains("id=\"target-inspector\""));
+        assert!(page.contains("Canary’s signed claim"));
+        assert!(page.contains("The underlying proof material"));
+        assert!(page.contains("unsigned diagnostic data"));
+        assert!(page.contains("canaryctl verify"));
         assert!(page.contains("class=\"target-card status-verified\""));
         assert!(page.contains("class=\"status-badge\""));
         assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;"));

@@ -17,6 +17,27 @@ Canary supports 1–100 targets. It serves a public status page and JSON API on 
 
 The StageX image is linux/amd64. Docker Desktop can emulate it on Apple Silicon.
 
+## Start with the status UI
+
+Once Canary is running, open its root URL first:
+
+```text
+https://canary.example.com/
+```
+
+The dashboard is the guided entry point. Select **Inspect** on any target to see:
+
+- The current target state and what the badge does—and does not—prove.
+- The hybrid-signed **statement**, which records Canary's conclusion.
+- The linked **evidence**, which is the raw nonce-bound Nitro proof Canary evaluated.
+- Process-lifetime **history**, which is useful unsigned diagnostic context rather
+  than cryptographic proof.
+- A ready-to-copy `canaryctl verify` command for independent local verification.
+
+The original JSON endpoints remain linked throughout the UI. The page itself does not
+perform browser-side cryptographic verification; use the displayed `canaryctl` command
+to verify the Canary node, statement, and evidence chain locally.
+
 ## Build the operator CLI
 
 ```sh
@@ -245,10 +266,11 @@ signature, certificate time, nonce and exact PCR values before trusting the atte
 config and key digests. It then verifies each target statement and its linked evidence
 against the target PCR policy in that attested config.
 
-For local demos only, `--insecure` may replace `--pcrs-file`. It permits HTTP and uses
-the PCRs reported by the live Canary attestation itself. AWS chain/signature, nonce,
-config/key binding, statement and target-evidence verification remain enabled, but the
-Canary workload identity is not independently established.
+These two commands cover different links in the trust chain: `caution verify
+--save-pcrs` establishes the expected PCR identity of the deployed Canary image;
+`canaryctl verify` consumes that trusted file and verifies the live Canary
+attestation, attested config and keys, signed target statements, and linked target
+evidence. Both are required for end-to-end verification.
 
 The lower-level command verifies fresh Canary attestation and saves its public signing
 keys:
@@ -259,6 +281,20 @@ canaryctl inspect-node \
   --pcrs-file .caution/trusted_hashes.json \
   --keys-out trusted-keys.json
 ```
+
+For an out-of-Caution test/demo deployment only, `inspect-node --insecure` permits an
+HTTP origin and self-pins PCR0/1/2 from the fresh attestation:
+
+```sh
+canaryctl inspect-node \
+  --url http://localhost:1111 \
+  --insecure \
+  --keys-out demo-keys.json
+```
+
+It still verifies the AWS certificate chain, COSE signature, certificate time, fresh
+nonce, and config/key binding. It does **not** establish the Canary workload identity;
+the exported keys are suitable only for the test/demo flow.
 
 Then the offline commands can verify a downloaded target statement and evidence:
 
@@ -275,8 +311,9 @@ canaryctl verify-evidence \
   --pcrs-file .caution/trusted_hashes/payments-prod.json
 ```
 
-`inspect-node` and `verify-evidence` require exactly one of `--pcrs-file` or
-`--insecure`; there is no implicit trust downgrade.
+`verify` and `verify-evidence` always require independently trusted PCR files.
+`inspect-node` requires exactly one of `--pcrs-file` or the explicit demo-only
+`--insecure` mode; there is no implicit trust downgrade.
 
 ## HTTP API
 

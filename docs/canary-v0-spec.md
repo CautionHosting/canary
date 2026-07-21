@@ -257,11 +257,6 @@ for reproducible historical verification; the bundle alone does not prove that t
 or its nonce was fresh. Freshness requires a separately trusted hybrid statement
 binding the same `evidence_digest` and `observed_at`.
 
-The offline CLI may accept `--insecure` instead of `--pcrs-file` only as an explicit
-diagnostic mode. It then self-pins PCR0/1/2 extracted from the signed document while
-retaining chain, signature, time, nonce, canonicalization and digest checks. This does
-not independently verify workload identity or establish freshness for the bundle.
-
 The SDK verification must cover the embedded AWS root chain, certificate validity,
 COSE ES384 signature, exact nonce, and exact PCR0/1/2 equality. Config validation
 rejects all-zero/debug PCR policies.
@@ -313,11 +308,14 @@ not image measurements; they are runtime-bound to that measured enclave by signe
 
 `canaryctl inspect-node --pcrs-file <verified-canary-pcrs> --keys-out <path>` automates
 steps 2 and 3 and atomically saves the exact key document whose digest it verified.
-It requires exactly one explicit trust mode: `--pcrs-file` performs independent
-measurement verification, while `--insecure` accepts self-reported PCRs and may use
-HTTP for local demos. In insecure mode the AWS chain, COSE signature, certificate
-time, nonce and config/key bindings remain mandatory, but workload identity is not
-independently established.
+Its normal mode requires `--pcrs-file`, performs independent measurement
+verification, and accepts only an HTTPS Canary origin.
+
+For out-of-Caution test/demo deployments only, `inspect-node --insecure` may accept an
+HTTP origin and self-pin PCR0/1/2 from the fresh signed attestation. It must retain AWS
+chain, COSE signature, certificate-time, nonce, and config/key binding verification,
+and must warn that workload identity is not established and exported keys are
+demo-only. `verify` and `verify-evidence` provide no insecure mode.
 
 ## 8. Signing and key management
 

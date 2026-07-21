@@ -85,23 +85,12 @@ enum Command {
         #[arg(long)]
         evidence: PathBuf,
         /// Path to a separately trusted `.caution/trusted_hashes.json` file.
-        #[arg(
-            long,
-            required_unless_present = "insecure",
-            conflicts_with = "insecure"
-        )]
-        pcrs_file: Option<PathBuf>,
-        /// Accept self-reported PCRs. All other evidence checks remain enabled.
-        #[arg(
-            long,
-            required_unless_present = "pcrs_file",
-            conflicts_with = "pcrs_file"
-        )]
-        insecure: bool,
+        #[arg(long)]
+        pcrs_file: PathBuf,
     },
     /// Verify fresh Canary node metadata against config and public keys (spec §7.3).
     InspectNode {
-        /// Canary HTTPS origin, for example https://canary.example.com.
+        /// Canary origin. HTTPS is required unless --insecure is set.
         #[arg(long)]
         url: String,
         /// Independently verified Canary PCR0/1/2 file.
@@ -111,7 +100,7 @@ enum Command {
             conflicts_with = "insecure"
         )]
         pcrs_file: Option<PathBuf>,
-        /// Allow HTTP and accept self-reported PCRs. All other checks remain enabled.
+        /// Demo only: allow HTTP and self-pin PCRs from the live attestation.
         #[arg(
             long,
             required_unless_present = "pcrs_file",
@@ -124,23 +113,12 @@ enum Command {
     },
     /// Verify a live Canary node and all selected target claims end to end.
     Verify {
-        /// Canary origin, for example https://canary.example.com.
+        /// Canary HTTPS origin, for example https://canary.example.com.
         #[arg(long)]
         url: String,
         /// Independently verified Canary PCR0/1/2 file.
-        #[arg(
-            long,
-            required_unless_present = "insecure",
-            conflicts_with = "insecure"
-        )]
-        pcrs_file: Option<PathBuf>,
-        /// Allow HTTP and accept self-reported Canary PCRs.
-        #[arg(
-            long,
-            required_unless_present = "pcrs_file",
-            conflicts_with = "pcrs_file"
-        )]
-        insecure: bool,
+        #[arg(long)]
+        pcrs_file: PathBuf,
         /// Verify only this target ID. Repeat to select multiple targets; defaults to all.
         #[arg(long)]
         target: Vec<String>,
@@ -243,8 +221,7 @@ fn main() -> Result<()> {
         Command::VerifyEvidence {
             evidence,
             pcrs_file,
-            insecure,
-        } => verify_evidence::run_offline(&evidence, pcrs_file.as_deref(), insecure),
+        } => verify_evidence::run_offline(&evidence, &pcrs_file),
 
         Command::InspectNode {
             url,
@@ -256,16 +233,9 @@ fn main() -> Result<()> {
         Command::Verify {
             url,
             pcrs_file,
-            insecure,
             target,
             keys_out,
-        } => live_verify::run(
-            &url,
-            pcrs_file.as_deref(),
-            insecure,
-            &target,
-            keys_out.as_deref(),
-        ),
+        } => live_verify::run(&url, &pcrs_file, &target, keys_out.as_deref()),
     }
 }
 

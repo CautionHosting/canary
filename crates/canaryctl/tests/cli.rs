@@ -280,7 +280,7 @@ fn offline_evidence_verification_uses_public_fixture_and_rejects_replay() {
 }
 
 #[test]
-fn capture_rejects_insecure_url_before_network_or_write() {
+fn capture_rejects_http_url_before_network_or_write() {
     let dir = TempDir::new("capture-http");
     let config = dir.join("canary.json");
     let output = run(&[
@@ -321,7 +321,7 @@ fn inspect_node_rejects_non_https_origin_without_writing_keys() {
 }
 
 #[test]
-fn verification_commands_require_an_explicit_trust_mode() {
+fn strict_verification_commands_require_pcrs_file() {
     let dir = TempDir::new("trust-mode");
     let keys = dir.join("keys.json");
     let evidence = dir.join("evidence.json");
@@ -342,11 +342,10 @@ fn verification_commands_require_an_explicit_trust_mode() {
     assert!(!evidence.status.success());
     let evidence_error = String::from_utf8_lossy(&evidence.stderr);
     assert!(evidence_error.contains("--pcrs-file"));
-    assert!(evidence_error.contains("--insecure"));
 
     let live = run(&["verify", "--url", "https://canary.example.com"]);
     assert!(!live.status.success());
     let live_error = String::from_utf8_lossy(&live.stderr);
     assert!(live_error.contains("--pcrs-file"));
-    assert!(live_error.contains("--insecure"));
+    assert!(!live_error.contains("--insecure"));
 }

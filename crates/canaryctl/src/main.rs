@@ -22,7 +22,11 @@ use clap::{Parser, Subcommand};
 use config_cmd::{load_or_create_config, upsert_target, validate_and_write, TrustedHashesFile};
 
 #[derive(Parser)]
-#[command(name = "canaryctl", about = "Caution Canary operator CLI (V0)")]
+#[command(
+    name = "canaryctl",
+    version,
+    about = "Caution Canary operator CLI (V0)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

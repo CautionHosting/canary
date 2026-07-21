@@ -43,6 +43,16 @@ fn path_arg(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 
+#[test]
+fn version_reports_the_release_version() {
+    let output = run(&["--version"]);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "canaryctl 0.1.0\n"
+    );
+}
+
 fn write_trusted_pcrs(path: &Path) {
     std::fs::write(
         path,

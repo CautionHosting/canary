@@ -1,163 +1,213 @@
 # Caution Canary
 
-Canary is a small Rust service that runs inside a Caution enclave. It repeatedly
-challenges Caution/Bootproof attestation endpoints, checks PCR0/1/2 against a static
-measured configuration, and publishes short-lived statements signed with Ed25519 and
-ML-DSA-65.
+Canary continuously checks public Caution/Bootproof attestation endpoints. It
+compares fresh nonce-bound AWS Nitro evidence with configured PCR0/1/2 values and
+publishes short-lived statements signed with Ed25519 and ML-DSA-65.
 
-## Current status
+Canary supports 1–100 targets. It serves a public status page and JSON API on port
+8080.
 
-- Implemented: offline trust core, multi-target monitor, hardened target client,
-  ephemeral SQLite history, read-only API, hybrid signing, attested metadata and node
-  inspection.
-- Deployment tooling: digest-pinned StageX `Containerfile`, strict deployment
-  validation, reproducibility check, evaluator script and Caution configuration
-  templates.
-- Operator inputs are intentionally absent: final `canary.json`, final `caution.hcl`,
-  Caution deployment metadata, quorum bundle and encrypted seed.
-- This repository does not claim that the live Phase 3 acceptance run has occurred.
-  Its evidence must be recorded under
-  [`docs/evidence/v0/`](docs/evidence/v0/README.md).
+## Requirements
 
-The normative design and 14 acceptance criteria are in
-[`docs/canary-v0-spec.md`](docs/canary-v0-spec.md).
+- Rust 1.88 or newer to build `canaryctl`.
+- Docker with BuildKit and linux/amd64 support for the local image.
+- One or more publicly reachable HTTPS Bootproof `/attestation` endpoints.
+- For Caution deployment: the Caution CLI and account, a public source repository,
+  a public DNS name, a Keymaker URL, and a Locksmith shard-holder keyring.
 
-## Evaluator quickstart
+The StageX image is linux/amd64. Docker Desktop can emulate it on Apple Silicon.
 
-### Prerequisites
-
-- Linux amd64 with Rust, Docker Buildx, `jq`, Git and the Caution CLI.
-- A public source repository URL and public Canary domain.
-- Two distinct public target `/attestation` URLs and independently verified PCR files.
-- An authenticated Caution account, deployment SSH access, Keymaker URL and authorized
-  passkey/Locksmith operator.
-- Controlled replay and outage targets for the failure and recovery demonstration.
-
-Build the operator CLI and add it to the current shell:
+## Build the operator CLI
 
 ```sh
 cargo build --release --locked -p canaryctl
 export PATH="$PWD/target/release:$PATH"
-canaryctl --help
 ```
 
-### 1. Create the measured deployment inputs
+`canaryctl --help` lists the available commands.
 
-Copy and review the Caution template, replacing both public placeholders:
+## Configure targets
+
+`canary.json` contains a stable ID for this Canary and the expected PCR0/1/2 values
+for every target. Create it with one of the following enrollment methods.
+
+### Independently reproduced PCRs
+
+Use `caution verify` to reproduce the target and save its PCRs, then add the target:
+
+```sh
+mkdir -p .caution/trusted_hashes
+caution verify \
+  --attestation-url https://payments.example.com/attestation \
+  --save-pcrs
+cp .caution/trusted_hashes.json \
+  .caution/trusted_hashes/payments-prod.json
+
+canaryctl config add \
+  --config canary.json \
+  --node-id company-canary \
+  --id payments-prod \
+  --name "Payments production" \
+  --attestation-url https://payments.example.com/attestation \
+  --pcrs-file .caution/trusted_hashes/payments-prod.json
+```
+
+`--node-id` is required only when creating the file. For each additional target,
+save its PCRs under a distinct name and repeat `config add` without `--node-id`.
+Updating an existing target requires `--replace`.
+
+### Trust on first use
+
+This path needs no Caution account. It records the PCRs returned by the live target
+after interactive confirmation:
+
+```sh
+canaryctl capture \
+  --config canary.json \
+  --node-id company-canary \
+  --id payments-prod \
+  --name "Payments production" \
+  --attestation-url https://payments.example.com/attestation
+```
+
+TOFU verifies fresh Bootproof evidence but does not reproduce the target from
+source. It establishes continuity from the captured PCRs.
+
+Target IDs and `node_id` may contain ASCII letters, digits, `-`, and `_`. Target
+URLs must use HTTPS, and every PCR must be a nonzero lowercase 96-character
+SHA-384 hex value. Canary rejects target DNS answers for loopback, private,
+link-local, multicast, and other non-public address ranges.
+
+## Run locally with Docker, without Caution
+
+Generate a development seed, build the local image target, and run it with the
+configuration mounted read-only:
+
+```sh
+canaryctl seed generate --env-file .env
+
+docker buildx build \
+  --load \
+  --platform linux/amd64 \
+  --target local \
+  --tag caution-canary:local \
+  --file Containerfile \
+  .
+
+docker run --rm --platform linux/amd64 \
+  --publish 127.0.0.1:8080:8080 \
+  --env-file .env \
+  --volume "$PWD/canary.json:/app/canary.json:ro" \
+  caution-canary:local
+```
+
+In another shell:
+
+```sh
+curl -fsS http://localhost:8080/health
+curl -fsS http://localhost:8080/status.json
+```
+
+The status page is at <http://localhost:8080/>. The local container probes and
+verifies configured targets, but it does not expose its own `/attestation` endpoint;
+Caution adds that endpoint through Bootproofd.
+
+The local SQLite database is `/tmp/canary/canary.sqlite3` and is discarded with the
+container. Never commit `.env`: it contains the root seed for this Canary's signing
+keys.
+
+## Deploy on Caution
+
+### 1. Create the deployment configuration
 
 ```sh
 cp caution.hcl.template caution.hcl
 $EDITOR caution.hcl
 ```
 
-Do not deploy the template unchanged. `canary.json.template` illustrates the schema
-only; let `canaryctl config add` create the final measured `canary.json`.
+Replace the source repository URL and public HTTPS domain. `caution.hcl` deploys
+Canary itself; monitored targets remain in `canary.json`.
 
-Preferred enrollment starts with separately reproduced target PCRs. Save each result
-before the next `caution verify --save-pcrs` overwrites it:
+### 2. Authenticate and initialize
 
-```sh
-mkdir -p .caution/trusted_hashes
-
-caution verify --attestation-url https://payments.example.com/attestation --save-pcrs
-cp .caution/trusted_hashes.json .caution/trusted_hashes/payments-prod.json
-
-caution verify --attestation-url https://ledger.example.com/attestation --save-pcrs
-cp .caution/trusted_hashes.json .caution/trusted_hashes/ledger-prod.json
-
-canaryctl config add \
-  --config canary.json --node-id caution-canary-demo \
-  --id payments-prod --name "Payments production" \
-  --attestation-url https://payments.example.com/attestation \
-  --pcrs-file .caution/trusted_hashes/payments-prod.json
-
-canaryctl config add \
-  --config canary.json \
-  --id ledger-prod --name "Ledger production" \
-  --attestation-url https://ledger.example.com/attestation \
-  --pcrs-file .caution/trusted_hashes/ledger-prod.json
-```
-
-For a separate TOFU demonstration only:
+First-time accounts register with an access code. Existing accounts log in:
 
 ```sh
-canaryctl capture \
-  --config canary-tofu-demo.json --node-id caution-canary-tofu-demo \
-  --id tofu-target --name "TOFU demonstration only" \
-  --attestation-url https://tofu.example.com/attestation
+caution register --alpha-code YOUR_ACCESS_CODE  # first time only
+# or: caution login
+
+caution ssh-keys add --from-agent
+caution init
 ```
 
-`capture` verifies fresh Bootproof evidence and asks before recording the observed
-PCRs. It proves continuity from that enrolled endpoint, not that the PCRs reproduce
-reviewed source. Canary never silently updates an enrolled baseline.
+`caution init` validates `caution.hcl`, creates `.caution/deployment.json`, and adds
+the `caution` Git remote.
 
-### 2. Generate and encrypt the one root seed
+### 3. Encrypt the master seed with Locksmith
+
+Generate the seed if `.env` does not already exist:
 
 ```sh
 canaryctl seed generate --env-file .env
+```
 
-# PAUSE: authorized Keymaker/Locksmith operator required.
-caution secret keygen canary.asc \
-  --name "Canary POC" --email canary@example.com --shoot-self-in-foot
-export KEYMAKER_URL=https://<keymaker-host>
-caution secret new canary.asc --threshold 1 --max 1
+Create a quorum from a shard-holder public keyring, then encrypt the seed:
+
+```sh
+export KEYMAKER_URL=https://keymaker.example.com
+caution secret new keyring.asc --threshold 2 --max 3
 caution secret encrypt --env-file .env CANARY_MASTER_SEED
 ```
 
-This is a POC-only 1-of-1 quorum with an unencrypted development keyring. Never commit
-`.env` or `canary.private.asc`, and do not use this arrangement in production.
+`--max` must equal the number of eligible certificates in `keyring.asc`. Each
+certificate needs signing, encryption, and authentication subkeys. See the
+[Caution key services guide](https://docs.caution.co/concepts/key-services/) for
+production shard-holder setup. Do not commit `.env` or private keyrings.
 
-### 3. Initialize, validate and reproduce
+### 4. Commit and deploy
 
-```sh
-# PAUSE: authenticated Caution account, passkey and deployment SSH key required.
-caution init
-
-./scripts/validate-deployment.sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
-./scripts/check-reproducible.sh
-caution apps build --no-cache
-```
-
-The reproducibility script performs two uncached Linux amd64 OCI builds with fixed
-timestamps, disabled non-deterministic provenance metadata and a byte-for-byte
-comparison. This demonstrates local determinism; an independent evaluator and
-`caution verify` are still required.
-
-### 4. Deploy, verify and send the shard
-
-Commit only public/measured inputs, deployment metadata, the public quorum bundle and
-the encrypted secret:
+Commit the measured configuration, deployment metadata, public quorum bundle, and
+encrypted seed:
 
 ```sh
 git add canary.json Containerfile caution.hcl .caution/deployment.json \
-  .caution/quorum-bundle.json .caution/secrets/CANARY_MASTER_SEED.asc \
-  .caution/trusted_hashes
-git commit -m "Deploy Canary V0 POC"
+  .caution/quorum-bundle.json \
+  .caution/secrets/CANARY_MASTER_SEED.asc
+git commit -m "Deploy Canary"
 git push caution main
-
-caution verify --save-pcrs
-
-# PAUSE: authorized Locksmith operator required.
-caution secret send-shard --keyring canary.private.asc
 ```
 
-The saved PCRs now describe the deployed Canary, not either monitored target.
+From a non-`main` local branch, use `git push caution HEAD:main`. The Git push is
+the deployment action; `caution apps build` only builds an image for local
+inspection.
 
-### 5. Inspect and verify public artifacts
+### 5. Verify and release the seed
 
-Inspect fresh Canary attestation before trusting the served hybrid keys:
+```sh
+caution verify --save-pcrs
+caution secret send-shard
+```
+
+Each authorized shard holder repeats `caution secret send-shard` until the quorum
+is met. Canary starts after Locksmith releases `CANARY_MASTER_SEED` inside the
+enclave.
+
+## Verify a deployed Canary
+
+Verify fresh Canary attestation before trusting its public signing keys:
 
 ```sh
 canaryctl inspect-node \
-  --url https://<canary-host> \
+  --url https://canary.example.com \
   --pcrs-file .caution/trusted_hashes.json \
   --keys-out trusted-keys.json
+```
 
-curl -fsS https://<canary-host>/targets/payments-prod/statement -o statement.json
-curl -fsS https://<canary-host>/targets/payments-prod/evidence -o evidence.json
+Then verify a target statement and its linked evidence:
+
+```sh
+curl -fsS https://canary.example.com/targets/payments-prod/statement -o statement.json
+curl -fsS https://canary.example.com/targets/payments-prod/evidence -o evidence.json
 
 canaryctl verify-statement \
   --statement statement.json \
@@ -168,90 +218,43 @@ canaryctl verify-evidence \
   --pcrs-file .caution/trusted_hashes/payments-prod.json
 ```
 
-`inspect-node` verifies that fresh Canary attestation binds the measured config digest
-and exact served keyset digest. Downloading keys and statements from the same
-uninspected node proves only self-consistency.
+`inspect-node` without `--pcrs-file` checks self-consistency only. It does not
+establish that the Canary image matches independently reproduced PCRs.
 
-Standalone evidence verification checks the document and PCRs at its recorded
-`observed_at`; freshness also requires the trusted statement that binds the same
-evidence digest and observation time.
-
-For a guided transcription of this flow, set `CANARY_HOST`, `PAYMENTS_URL`,
-`LEDGER_URL`, `PAYMENTS_PCRS` and `LEDGER_PCRS`, then run:
-
-```sh
-./scripts/demo-v0.sh
-```
-
-The script pauses for secret, passkey and deployment actions. It does not generate,
-read or print the master seed or private keyring.
-
-## Exact V0 claim and limits
-
-A `VERIFIED` `caution.canary.pcr-match.v0` statement means:
-
-> At the stated time, this Canary obtained valid fresh nonce-bound AWS Nitro evidence
-> from the target, and PCR0/1/2 matched the values embedded in the Canary's measured
-> configuration.
-
-It does not prove source reproduction unless the preferred enrollment workflow was
-completed. It also does not prove that normal traffic reached the same enclave, cover
-every load-balanced replica, assess application correctness or provide uninterrupted
-history between probes. Enumerate replica endpoints when each replica must be covered.
-
-The statement envelope requires both Ed25519 and ML-DSA-65 verification. It is
-hybrid post-quantum signed, not quantum-proof, because Nitro's attestation chain
-remains classical.
-
-Current Caution egress is a boolean gate. The broad TCP/443 rule enables outbound
-access, while Canary enforces target restrictions through measured configuration,
-fresh DNS resolution, prohibited-address rejection and socket pinning. This does not
-protect against host/platform compromise and remains an explicit V0 exception.
-
-## Runtime and public interfaces
-
-- `canaryd` reads `/app/canary.json` and only `CANARY_MASTER_SEED` as secret input.
-- It writes attested metadata to `/metadata.json` and current-lifetime SQLite state to
-  `/tmp/canary/canary.sqlite3`.
-- Targets start as signed `PENDING`, probe immediately and then every 60 seconds with
-  bounded jitter and concurrency.
-- A transport failure preserves a still-fresh definitive result with a warning.
-  Persistent failure becomes `UNREACHABLE` only after three failures and TTL expiry;
-  one valid probe recovers immediately.
-- Restart wipes history, returns targets to `PENDING` and triggers immediate probes.
-- Canary verifies Bootproof over HTTPS and never calls `/dev/nsm`, Nitro drivers or
-  attestation-generation APIs directly.
-- Caution Bootproofd, not `canaryd`, owns `POST /attestation`.
-
-Available `canaryctl` commands are `config add`, `capture`, `seed generate`,
-`inspect-node`, `verify-statement` and `verify-evidence`. Use `canaryctl --help` for
-the exact interface.
+## HTTP API
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /` | Multi-target status page |
 | `GET /health` | Liveness and readiness |
-| `GET /status.json` | Current per-target states |
+| `GET /status.json` | Current state for every target |
 | `GET /targets/{id}/statement` | Latest hybrid-signed statement |
 | `GET /targets/{id}/evidence` | Latest Bootproof evidence bundle |
-| `GET /targets/{id}/history` | Current-enclave-lifetime history |
-| `GET /config.json` | Measured config and digest |
-| `GET /keys.json` | Hybrid public key set |
+| `GET /targets/{id}/history` | Up to 100 observations from the current database |
+| `GET /config.json` | Measured target configuration and digest |
+| `GET /keys.json` | Ed25519 and ML-DSA-65 public keys |
 
-All application endpoints are public in V0. Treat target names, URLs, PCRs, public
-keys and evidence as public information.
+All endpoints are public. Treat target names, URLs, PCRs, keys, and evidence as
+public information.
 
-V0 intentionally has no durable storage, webhooks, mutable configuration API,
-customer signatures, timestamping or automatic replica discovery. Public
-interoperability vectors are under
-[`crates/canary-core/tests/data`](crates/canary-core/tests/data/README.md).
+## Runtime behavior and limits
 
-Run and record the mismatch, replay, outage, expiry, recovery, restart, configuration
-change and TOFU scenarios using the matrix in
-[`docs/evidence/v0/README.md`](docs/evidence/v0/README.md). A config change is a source
-change and requires a newly measured deployment.
+- Targets are probed immediately, then every 60 seconds with 0–5 seconds of jitter.
+  At most eight probes run concurrently; each attempt times out after 15 seconds.
+- A definitive result is valid for 180 seconds. Transport failures can preserve a
+  still-valid result with a warning; successful verification recovers immediately.
+- Every process start publishes fresh `PENDING` statements and probes immediately.
+  Existing history remains only if the same SQLite database remains available.
+  Replacing the container or enclave discards `/tmp` history.
+- A local bind-mounted `canary.json` change requires a container restart. A Caution
+  deployment embeds the file, so changing it requires rebuilding and redeploying.
+- Canary has no durable storage, mutable configuration API, alerts, webhooks,
+  timestamp authority, automatic replica discovery, or application traffic-path
+  binding.
+- A `VERIFIED` result means fresh Nitro evidence matched the configured PCR0/1/2.
+  It does not prove application correctness or that all load-balanced replicas were
+  observed. Configure each replica endpoint when each replica must be covered.
 
 ## License
 
-This workspace is `AGPL-3.0-only`; see [LICENSE.md](LICENSE.md). The pinned
-`bootproof-sdk` source is also AGPL-3.0.
+This workspace is licensed under `AGPL-3.0-only`; see [LICENSE.md](LICENSE.md).

@@ -3,10 +3,10 @@ resolver = "2"
 members = ["crates/canary-core", "crates/canaryd", "crates/canaryctl"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Internal

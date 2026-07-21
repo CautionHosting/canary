@@ -31,8 +31,8 @@ This V0 implements a small coherent Canary system:
 
 It intentionally defers customer-approved source-release policies, signed Reproducer
 input, application-traffic key binding, independent client/widget consumption,
-multi-region verification, alerts and durable evidence. `canary-product-brief.md`
-remains the broader product direction, not the V0 acceptance contract.
+multi-region verification, alerts and durable evidence. These capabilities are outside
+V0 and are not specified in this repository.
 
 ## 2. V0 decisions
 

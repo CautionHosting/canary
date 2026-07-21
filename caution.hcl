@@ -7,7 +7,6 @@ enclave "main" {
     app_sources = [
       "https://codeberg.org/vkobel/canary",
     ]
-    cache = false
   }
 
   network {

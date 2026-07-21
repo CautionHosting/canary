@@ -71,7 +71,7 @@ h1 { margin: 0; color: #f2f8fa; font-size: clamp(34px, 5vw, 54px); font-weight: 
 .intro { margin-bottom: 42px; }
 .topline { display: flex; align-items: flex-start; justify-content: space-between; gap: 28px; }
 .raw-nav { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-.raw-nav a, .actions a, .raw-link {
+.raw-nav a, .raw-link {
   padding: 7px 9px;
   color: var(--accent);
   text-decoration: none;
@@ -79,18 +79,13 @@ h1 { margin: 0; color: #f2f8fa; font-size: clamp(34px, 5vw, 54px); font-weight: 
   background: rgba(8, 12, 16, .55);
   font-size: 11px;
 }
-.raw-nav a:hover, .actions a:hover, .raw-link:hover { background: var(--accent-soft); border-color: rgba(99, 220, 255, .32); }
+.raw-nav a:hover, .raw-link:hover { background: var(--accent-soft); border-color: rgba(99, 220, 255, .32); }
 
-.node-meta { display: grid; grid-template-columns: minmax(180px, .55fr) minmax(240px, 1fr); gap: 18px 32px; margin: 34px 0 22px; }
+.node-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 32px; margin: 34px 0 22px; }
 .meta-item { min-width: 0; }
-.meta-item--wide { grid-column: 1 / -1; }
 .label, dt { display: block; margin: 0 0 5px; }
 .value, dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #cbd7dc; }
-.environment { display: inline-flex; align-items: center; gap: 7px; color: var(--warning); }
-.environment::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 9px currentColor; }
-.environment--enclave { color: var(--success); }
-
-.trust-note { display: grid; grid-template-columns: 170px 1fr; gap: 20px; padding: 16px 18px; border: 1px solid rgba(232, 200, 114, .2); border-left: 2px solid var(--warning); background: rgba(232, 200, 114, .045); }
+.trust-note { padding: 14px 16px; border: 1px solid rgba(99, 220, 255, .16); border-left: 2px solid rgba(99, 220, 255, .52); background: rgba(99, 220, 255, .025); }
 .trust-note strong { color: var(--warning); font-weight: 650; }
 .trust-note p { margin: 0; color: #aab7be; }
 
@@ -100,9 +95,6 @@ h1 { margin: 0; color: #f2f8fa; font-size: clamp(34px, 5vw, 54px); font-weight: 
 .verify-box p { max-width: 820px; margin: 0 0 15px; color: #9dadb5; }
 .verify-step { margin-top: 22px; }
 .verify-step h3 { margin: 0 0 9px; color: #edf5f8; font-size: 14px; font-weight: 600; }
-.verification-layers { margin: 18px 0 0; padding-left: 22px; color: #9dadb5; }
-.verification-layers li { margin: 7px 0; padding-left: 5px; }
-.verification-layers strong { color: var(--text); }
 .command-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; border: 1px solid var(--border); background: rgba(7, 11, 14, .72); }
 .command-row pre { margin: 0; padding: 14px 16px; overflow: auto; color: #a8c5ce; white-space: pre-wrap; overflow-wrap: anywhere; }
 .copy-button, .close-button, .open-target, .tab {
@@ -139,7 +131,6 @@ h1 { margin: 0; color: #f2f8fa; font-size: clamp(34px, 5vw, 54px); font-weight: 
 code { color: #cbd6db; font: inherit; }
 .transport-warning { padding: 10px 12px; background: rgba(232, 200, 114, .06); border: 1px solid rgba(232, 200, 114, .18); }
 .transport-warning dt, .transport-warning dd, .transport-warning code { color: var(--warning); }
-.actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 14px 16px; background: var(--surface-soft); border-top: 1px solid var(--border); }
 
 dialog { width: min(1040px, calc(100% - 32px)); max-height: calc(100vh - 32px); padding: 0; color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); box-shadow: 0 28px 90px rgba(0, 0, 0, .65); }
 dialog::backdrop { background: rgba(1, 5, 8, .82); backdrop-filter: blur(5px); }
@@ -168,7 +159,6 @@ dialog::backdrop { background: rgba(1, 5, 8, .82); backdrop-filter: blur(5px); }
 .artifact-output table { width: 100%; border-collapse: collapse; white-space: nowrap; }
 .artifact-output th, .artifact-output td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
 .artifact-output th { position: sticky; top: 0; color: var(--muted); background: #070b0e; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
-.digest-cell { max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
 .history-status { font-weight: 700; }
 .history-status-verified { color: var(--success); }
 .history-status-failed { color: var(--danger); }
@@ -178,14 +168,13 @@ dialog::backdrop { background: rgba(1, 5, 8, .82); backdrop-filter: blur(5px); }
 .panel-verify { margin: 0 0 18px 184px; padding: 14px; background: rgba(8, 12, 16, .28); border: 1px solid var(--border); }
 .panel-verify h3 { margin: 0 0 6px; color: #cbd7dc; font-size: 13px; font-weight: 600; }
 .panel-verify p { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
-.target-command-box { margin-top: 26px; margin-bottom: 0; }
+.deployment-command-box { margin-top: 26px; margin-bottom: 0; }
 
 @media (max-width: 820px) {
   .shell { padding: 42px 18px 58px; }
   .topline { display: block; }
   .raw-nav { justify-content: flex-start; margin-top: 24px; }
   .node-meta, .targets { grid-template-columns: 1fr; }
-  .meta-item--wide { grid-column: auto; }
   .panel-intro { grid-template-columns: 1fr; gap: 8px; }
   .panel-links, .inspector-details, .panel-verify { margin-left: 0; }
 }
@@ -214,42 +203,28 @@ const INSPECTOR: &str = r##"</main>
   <div class="inspector-shell">
     <header class="inspector-head">
       <div><span class="panel-kicker" id="inspector-kicker"></span><div class="inspector-title-row"><h2 id="inspector-title"></h2><span id="inspector-status" class="status-badge"></span></div></div>
-      <button class="close-button" type="button" data-close aria-label="Close target inspector">Close</button>
+      <button class="close-button" type="button" data-close aria-label="Close deployment inspector">Close</button>
     </header>
-    <nav class="tabs" role="tablist" aria-label="Target information">
-      <button class="tab" type="button" role="tab" data-tab="target" aria-selected="true">Target</button>
-      <button class="tab" type="button" role="tab" data-tab="statement" aria-selected="false" tabindex="-1">Statement</button>
-      <button class="tab" type="button" role="tab" data-tab="evidence" aria-selected="false" tabindex="-1">Evidence</button>
+    <nav class="tabs" role="tablist" aria-label="Deployment information">
+      <button class="tab" type="button" role="tab" data-tab="overview" aria-selected="true">Overview</button>
       <button class="tab" type="button" role="tab" data-tab="history" aria-selected="false" tabindex="-1">History</button>
     </nav>
-    <section class="panel" data-panel="target" role="tabpanel">
-      <div class="panel-intro"><h3>What you are seeing</h3><p>This is Canary’s <strong>current server-side conclusion</strong> for one configured target. The dashboard presents that conclusion; it does not independently verify signatures or Nitro evidence in your browser.</p></div>
+    <section class="panel" data-panel="overview" role="tabpanel">
+      <div class="panel-intro"><h3>Current result</h3><p>Canary signs the current result for this deployment. <strong>VERIFIED</strong> means fresh Nitro evidence matched its configured PCR0/1/2. Verify it locally with <code>canaryctl</code>.</p></div>
       <dl class="inspector-details">
-        <div class="detail detail--wide"><dt>Attested target origin</dt><dd id="inspector-origin"></dd></div>
-        <div class="detail"><dt>Signed reason</dt><dd id="inspector-reason"></dd></div>
+        <div class="detail detail--wide"><dt>Deployment URL</dt><dd id="inspector-origin"></dd></div>
+        <div class="detail"><dt>Result</dt><dd id="inspector-reason"></dd></div>
         <div class="detail"><dt>Observed</dt><dd id="inspector-observed"></dd></div>
-        <div class="detail"><dt>Claim expires</dt><dd id="inspector-expires"></dd></div>
+        <div class="detail"><dt>Valid until</dt><dd id="inspector-expires"></dd></div>
         <div class="detail"><dt>Transport warning</dt><dd id="inspector-warning"></dd></div>
       </dl>
-      <div class="panel-verify target-command-box"><h3>Verify this target locally</h3><div class="command-row"><pre id="target-command"></pre><button class="copy-button" type="button" data-copy="#target-command">Copy</button></div></div>
-    </section>
-    <section class="panel" data-panel="statement" role="tabpanel" hidden>
-      <div class="panel-intro"><h3>Canary’s signed claim</h3><p>The statement says <strong>what Canary concluded</strong>. Its Ed25519 and ML-DSA-65 signatures cover the target identity, result, config digest, evidence digest, observation time, expiry, verifier identity, and key epoch. A valid signature authenticates the claim; it does not replace checking the linked evidence.</p></div>
-      <div class="panel-verify"><h3>Verify this statement locally</h3><p>Download it and check both signatures with the enrolled Canary keys.</p><div class="command-row"><pre id="statement-command"></pre><button class="copy-button" type="button" data-copy="#statement-command">Copy</button></div></div>
-      <div class="panel-links"><a class="raw-link" id="statement-json-link" href="#">Open raw statement JSON</a></div>
-      <pre class="artifact-output" data-artifact-output data-state="idle">Select this view to load its current JSON.</pre>
-    </section>
-    <section class="panel" data-panel="evidence" role="tabpanel" hidden>
-      <div class="panel-intro"><h3>The underlying proof material</h3><p>Evidence is <strong>the target’s raw Bootproof/Nitro attestation bundle</strong>, including the nonce and document Canary checked against configured PCR0/1/2. It is not Canary’s conclusion. The signed statement binds its digest and observation time so the two artifacts cannot be silently mixed. Raw Nitro evidence can expose infrastructure metadata.</p></div>
-      <div class="panel-verify"><h3>Verify this evidence locally</h3><p>Download it and replay verification with independently trusted target PCRs.</p><div class="command-row"><pre id="evidence-command"></pre><button class="copy-button" type="button" data-copy="#evidence-command">Copy</button></div></div>
-      <div class="panel-links"><a class="raw-link" id="evidence-json-link" href="#">Open raw evidence JSON</a></div>
-      <pre class="artifact-output" data-artifact-output data-state="idle">Select this view to load its current JSON.</pre>
+      <div class="panel-verify deployment-command-box"><h3>Verify this deployment locally</h3><div class="command-row"><pre id="deployment-command"></pre><button class="copy-button" type="button" data-copy="#deployment-command">Copy</button></div></div>
+      <div class="panel-links"><a class="raw-link" id="statement-json-link" href="#">Statement JSON</a><a class="raw-link" id="evidence-json-link" href="#">Evidence JSON</a></div>
     </section>
     <section class="panel" data-panel="history" role="tabpanel" hidden>
-      <div class="panel-intro"><h3>Recorded attempts and replay</h3><p>History summaries are <strong>unsigned diagnostic data</strong>, but each decodable attempt retains its exact signed statement and nonce-bound evidence. Open an attempt’s artifacts or copy its <code>canaryctl verify-history</code> command to reproduce the cryptographic result locally. Transport and undecodable-response failures have no target evidence to replay.</p></div>
-      <div class="panel-verify"><h3>Verify a historical attempt locally</h3><p>Replace the attempt ID with one listed below.</p><div class="command-row"><pre id="history-command"></pre><button class="copy-button" type="button" data-copy="#history-command">Copy</button></div></div>
-      <div class="panel-links"><a class="raw-link" id="history-json-link" href="#">Open raw history JSON</a></div>
-      <div class="artifact-output" data-artifact-output data-state="idle">Select this view to load its current JSON.</div>
+      <div class="panel-intro"><h3>Recorded attempts</h3><p>Use a row’s command to replay that exact signed result locally. Failed transport attempts may not have evidence to replay.</p></div>
+      <div class="artifact-output" data-artifact-output data-state="idle">Select History to load recorded attempts.</div>
+      <div class="panel-links"><a class="raw-link" id="history-json-link" href="#">History JSON</a></div>
     </section>
   </div>
 </dialog>
@@ -263,35 +238,24 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
     page.push_str(environment_token(snapshot.runtime.environment));
     page.push_str("\" data-identity-mode=\"");
     page.push_str(identity_mode_token(snapshot.runtime.identity_mode));
-    page.push_str("\"><main class=\"shell\"><header class=\"intro\"><div class=\"topline\"><div><p class=\"eyebrow\">canaryd / ");
-    push_escaped(&mut page, &snapshot.runtime.binary_digest);
-    page.push_str("</p><h1>Canary status</h1><p class=\"lede\">Fresh Nitro attestation checks, short-lived signed claims, and the proof material behind them.</p></div><nav class=\"raw-nav\" aria-label=\"Raw node documents\"><a href=\"/status.json\">Status JSON</a><a href=\"/config.json\">Config JSON</a><a href=\"/keys.json\">Keys JSON</a></nav></div><div class=\"node-meta\"><div class=\"meta-item\"><span class=\"label\">Node</span><div class=\"value\">");
+    page.push_str("\"><main class=\"shell\"><header class=\"intro\"><div class=\"topline\"><div><p class=\"eyebrow\">canaryd</p><h1>Canary status</h1><p class=\"lede\">Canary checks each deployment’s Nitro attestation against expected PCR0/1/2 and signs the result.</p></div><nav class=\"raw-nav\" aria-label=\"Raw node documents\"><a href=\"/status.json\">Status JSON</a><a href=\"/config.json\">Config JSON</a><a href=\"/keys.json\">Keys JSON</a></nav></div><div class=\"node-meta\"><div class=\"meta-item\"><span class=\"label\">Node</span><div class=\"value\">");
     push_escaped(&mut page, &snapshot.node_id);
-    page.push_str("</div></div><div class=\"meta-item\"><span class=\"label\">Execution environment</span><div class=\"environment ");
-    if snapshot.runtime.environment == ExecutionEnvironment::NitroEnclave {
-        page.push_str("environment--enclave");
-    }
-    page.push_str("\">");
-    page.push_str(environment_label(snapshot.runtime.environment));
-    page.push_str("</div></div><div class=\"meta-item\"><span class=\"label\">Identity lifecycle</span><div class=\"value\">");
+    page.push_str("</div></div><div class=\"meta-item\"><span class=\"label\">Identity</span><div class=\"value\">");
     page.push_str(identity_mode_label(snapshot.runtime.identity_mode));
-    page.push_str("</div></div><div class=\"meta-item\"><span class=\"label\">Snapshot</span><div class=\"value\">");
+    page.push_str("</div></div><div class=\"meta-item\"><span class=\"label\">Last updated</span><div class=\"value\">");
     push_escaped(&mut page, &snapshot.generated_at.to_rfc3339());
-    page.push_str("</div></div><div class=\"meta-item meta-item--wide\"><span class=\"label\">Running binary</span><div class=\"value\">");
-    push_escaped(&mut page, &snapshot.runtime.binary_digest);
-    page.push_str("</div></div><div class=\"meta-item meta-item--wide\"><span class=\"label\">Config digest</span><div class=\"value\">");
-    push_escaped(&mut page, &snapshot.config_digest);
-    page.push_str("</div></div></div><div class=\"trust-note\" role=\"note\"><strong>How to read this page</strong><p>");
-    page.push_str(environment_trust_note(snapshot.runtime.environment));
-    page.push(' ');
-    page.push_str(identity_mode_note(snapshot.runtime.identity_mode));
-    page.push_str(" The badges are Canary’s server-side conclusions; this browser does not verify their signatures or evidence.</p></div></header>");
-    page.push_str("<section class=\"targets-section\" aria-labelledby=\"targets-heading\"><div class=\"section-heading\"><h2 id=\"targets-heading\">Monitored targets</h2><span class=\"target-count\">");
+    page.push_str("</div></div></div><div class=\"trust-note\" role=\"note\"><p>");
+    page.push_str(trust_summary(
+        snapshot.runtime.environment,
+        snapshot.runtime.identity_mode,
+    ));
+    page.push_str("</p></div></header>");
+    page.push_str("<section class=\"targets-section\" aria-labelledby=\"targets-heading\"><div class=\"section-heading\"><h2 id=\"targets-heading\">Deployments</h2><span class=\"target-count\">");
     page.push_str(&snapshot.targets.len().to_string());
     page.push_str(if snapshot.targets.len() == 1 {
-        " target"
+        " deployment"
     } else {
-        " targets"
+        " deployments"
     });
     page.push_str("</span></div><div class=\"targets\">");
 
@@ -326,27 +290,30 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
         page.push_str(status_class(target.status));
         page.push_str("\">");
         push_escaped(&mut page, status_text(target.status));
-        page.push_str("</span><button class=\"open-target\" type=\"button\" data-open-target aria-haspopup=\"dialog\">Inspect →</button></div></header><dl class=\"target-details\"><div class=\"detail detail--wide\"><dt>Attested target</dt><dd><code>");
+        page.push_str("</span><button class=\"open-target\" type=\"button\" data-open-target aria-haspopup=\"dialog\">Inspect →</button></div></header><dl class=\"target-details\"><div class=\"detail detail--wide\"><dt>Deployment URL</dt><dd><code>");
         push_escaped(&mut page, &target.target_origin);
-        page.push_str("</code></dd></div><div class=\"detail\"><dt>Reason</dt><dd><code>");
-        push_escaped(&mut page, &target.reason);
-        page.push_str("</code></dd></div><div class=\"detail\"><dt>Expires</dt><dd>");
+        page.push_str("</code></dd></div><div class=\"detail\"><dt>Last check</dt><dd>");
+        if let Some(observed) = target.observed_at {
+            push_escaped(&mut page, &observed.to_rfc3339());
+        } else {
+            page.push('—');
+        }
+        page.push_str("</dd></div><div class=\"detail\"><dt>Valid until</dt><dd>");
         push_escaped(&mut page, &target.expires_at.to_rfc3339());
         page.push_str("</dd></div>");
+        if target.status != canary_core::statement::Status::Verified {
+            page.push_str(
+                "<div class=\"detail detail--wide transport-warning\"><dt>Result</dt><dd><code>",
+            );
+            push_escaped(&mut page, &target.reason);
+            page.push_str("</code></dd></div>");
+        }
         if let Some(warning) = &target.transport_warning {
             page.push_str("<div class=\"detail detail--wide transport-warning\"><dt>Transport warning</dt><dd><code>");
             push_escaped(&mut page, warning);
             page.push_str("</code></dd></div>");
         }
-        page.push_str(
-            "</dl><nav class=\"actions\" aria-label=\"Raw target JSON\"><a href=\"/targets/",
-        );
-        push_escaped(&mut page, &target.id);
-        page.push_str("/statement\">Statement JSON</a><a href=\"/targets/");
-        push_escaped(&mut page, &target.id);
-        page.push_str("/evidence\">Evidence JSON</a><a href=\"/targets/");
-        push_escaped(&mut page, &target.id);
-        page.push_str("/history\">History JSON</a></nav></article>");
+        page.push_str("</dl></article>");
     }
 
     page.push_str("</div></section>");
@@ -364,16 +331,17 @@ fn push_verification_guide(
     environment: ExecutionEnvironment,
     identity_mode: IdentityMode,
 ) {
-    page.push_str("<section class=\"verify-box\" aria-labelledby=\"verify-heading\"><div class=\"verify-box-head\"><h2 id=\"verify-heading\">Verify independently</h2></div>");
+    page.push_str("<section class=\"verify-box\" aria-labelledby=\"verify-heading\"><div class=\"verify-box-head\"><h2 id=\"verify-heading\">Verify locally</h2></div>");
     match environment {
         ExecutionEnvironment::NitroEnclave => {
-            page.push_str("<p>A Nitro device is visible to this process. Treat that only as a runtime hint: the attested flow below is what proves the Canary workload and its measured configuration from outside the enclave. ");
-            page.push_str(identity_mode_note(identity_mode));
-            page.push_str("</p><div class=\"verify-step\"><h3>1. Reproduce Canary PCRs and enroll its signing keys</h3><p><code>inspect-node</code> requests a fresh nonce-bound Canary attestation, checks its PCR0/1/2, config digest, keyset digest and identity lifecycle, then saves the exact public keys without overwriting an existing pin.</p><div class=\"command-row\"><pre id=\"enroll-command\">caution verify --save-pcrs\ncanaryctl inspect-node --url &lt;this-origin&gt; --pcrs-file .caution/trusted_hashes.json --keys-out canary-keys.json</pre><button class=\"copy-button\" type=\"button\" data-copy=\"#enroll-command\">Copy</button></div></div><div class=\"verify-step\"><h3>2. Verify the node and every monitored target</h3><p>This checks each current published signed claim, not the complete attempt history. The CLI prints its signed observation, issuance and expiry times; use <code>verify-history</code> for one exact past attempt.</p><div class=\"command-row\"><pre id=\"all-targets-command\">canaryctl verify --url &lt;this-origin&gt; --pcrs-file .caution/trusted_hashes.json --keys canary-keys.json</pre><button class=\"copy-button\" type=\"button\" data-copy=\"#all-targets-command\">Copy</button></div><ol class=\"verification-layers\"><li><strong>Canary identity:</strong> fresh AWS/Nitro chain, COSE signature, nonce and exact Canary PCR0/1/2.</li><li><strong>Measured policy and keys:</strong> attested config/keyset digests plus exact equality with <code>canary-keys.json</code>.</li><li><strong>Signed claim:</strong> mandatory Ed25519 and ML-DSA-65 signatures, freshness, node, target and config binding.</li><li><strong>Target proof:</strong> exact statement/evidence digest link, then independent replay of the target Nitro evidence, nonce and configured target PCR0/1/2.</li></ol></div><p class=\"command-note\">The executable hash above identifies the bytes running here, but the independently reproduced Canary PCRs—not this self-reported page—establish workload identity.</p>");
+            page.push_str("<p><strong>ATTESTED:</strong> Canary’s fresh Nitro evidence matched operator-supplied Canary PCR0/1/2 and bound its config and keys.</p><div class=\"verify-step\"><h3>1. Enroll Canary’s keys</h3><div class=\"command-row\"><pre id=\"enroll-command\">caution verify --save-pcrs\ncanaryctl enroll --url &lt;this-origin&gt; --pcrs .caution/trusted_hashes.json</pre><button class=\"copy-button\" type=\"button\" data-copy=\"#enroll-command\">Copy</button></div></div><div class=\"verify-step\"><h3>2. Verify every deployment</h3><div class=\"command-row\"><pre id=\"all-deployments-command\">canaryctl verify --url &lt;this-origin&gt; --pcrs .caution/trusted_hashes.json</pre><button class=\"copy-button\" type=\"button\" data-copy=\"#all-deployments-command\">Copy</button></div></div>");
         }
         ExecutionEnvironment::NonEnclave => {
-            page.push_str("<p>No Nitro device is visible to this process, so Canary cannot offer its own hardware-backed workload identity. The development flow keeps all target verification but makes the initial signing-key enrollment explicit trust on first use (TOFU).</p><div class=\"verify-step\"><h3>1. Enroll the initially observed signing keys</h3><p>Review the endpoint you are connected to, then save its exact public keys. Protect this public file from modification.</p><div class=\"command-row\"><pre id=\"enroll-command\">canaryctl inspect-node --url &lt;this-origin&gt; --insecure --keys-out canary-keys.json</pre><button class=\"copy-button\" type=\"button\" data-copy=\"#enroll-command\">Copy</button></div></div><div class=\"verify-step\"><h3>2. Verify signer continuity and every monitored target</h3><p>This checks each current published signed claim, not the complete attempt history. The CLI prints its signed observation, issuance and expiry times; use <code>verify-history</code> for one exact past attempt.</p><div class=\"command-row\"><pre id=\"all-targets-command\">canaryctl verify --url &lt;this-origin&gt; --insecure --keys canary-keys.json</pre><button class=\"copy-button\" type=\"button\" data-copy=\"#all-targets-command\">Copy</button></div><ol class=\"verification-layers\"><li><strong>Canary identity:</strong> not verified; there is no Canary attestation or Canary PCR check.</li><li><strong>Signer continuity:</strong> live keys must exactly match the TOFU-enrolled <code>canary-keys.json</code>.</li><li><strong>Signed claim:</strong> both Ed25519 and ML-DSA-65 signatures and all statement/config/evidence links are checked.</li><li><strong>Target proof:</strong> target Nitro evidence, nonce and configured target PCR0/1/2 are still independently replayed.</li></ol></div><p class=\"command-note\">This detects later key substitution but cannot prove who controlled the endpoint during enrollment, that the initial config or configured target PCR policy was authentic, or that canaryd is reviewed code.</p>");
+            page.push_str("<p><strong>TOFU:</strong> signatures and deployment evidence are checked, but Canary’s initial identity and config authenticity are not established.</p><div class=\"verify-step\"><h3>1. Enroll Canary’s keys</h3><div class=\"command-row\"><pre id=\"enroll-command\">canaryctl enroll --url &lt;this-origin&gt; --insecure</pre><button class=\"copy-button\" type=\"button\" data-copy=\"#enroll-command\">Copy</button></div></div><div class=\"verify-step\"><h3>2. Verify every deployment</h3><div class=\"command-row\"><pre id=\"all-deployments-command\">canaryctl verify --url &lt;this-origin&gt; --insecure</pre><button class=\"copy-button\" type=\"button\" data-copy=\"#all-deployments-command\">Copy</button></div></div>");
         }
+    }
+    if identity_mode == IdentityMode::Ephemeral {
+        page.push_str("<p class=\"command-note\">This Canary identity is ephemeral; enroll new keys after restart.</p>");
     }
     page.push_str("</section>");
 }
@@ -392,17 +360,6 @@ fn identity_mode_label(mode: IdentityMode) -> &'static str {
     }
 }
 
-fn identity_mode_note(mode: IdentityMode) -> &'static str {
-    match mode {
-        IdentityMode::Stable => {
-            "The external master seed keeps the signing identity stable across restarts."
-        }
-        IdentityMode::Ephemeral => {
-            "The signing keys were generated for this process and change on restart; re-enroll a new key file after every restart."
-        }
-    }
-}
-
 fn environment_token(environment: ExecutionEnvironment) -> &'static str {
     match environment {
         ExecutionEnvironment::NitroEnclave => "nitro_enclave",
@@ -410,21 +367,12 @@ fn environment_token(environment: ExecutionEnvironment) -> &'static str {
     }
 }
 
-fn environment_label(environment: ExecutionEnvironment) -> &'static str {
-    match environment {
-        ExecutionEnvironment::NitroEnclave => "Nitro enclave detected",
-        ExecutionEnvironment::NonEnclave => "Non-enclave runtime detected",
-    }
-}
-
-fn environment_trust_note(environment: ExecutionEnvironment) -> &'static str {
-    match environment {
-        ExecutionEnvironment::NitroEnclave => {
-            "The local /dev/nsm check reports a Nitro enclave, but that is not remote proof. Verify the fresh Canary attestation and expected PCRs with canaryctl."
-        }
-        ExecutionEnvironment::NonEnclave => {
-            "No Nitro NSM device was detected. Use the explicitly insecure development workflow and treat its first key enrollment as TOFU."
-        }
+fn trust_summary(environment: ExecutionEnvironment, identity_mode: IdentityMode) -> &'static str {
+    match (environment, identity_mode) {
+        (ExecutionEnvironment::NitroEnclave, IdentityMode::Stable) => "Use canaryctl to independently verify Canary and its deployments.",
+        (ExecutionEnvironment::NitroEnclave, IdentityMode::Ephemeral) => "Use canaryctl to independently verify Canary and its deployments. This ephemeral identity changes on restart.",
+        (ExecutionEnvironment::NonEnclave, IdentityMode::Stable) => "This local runtime uses TOFU: independently verify signed deployment results, but treat the first key enrollment as explicit trust.",
+        (ExecutionEnvironment::NonEnclave, IdentityMode::Ephemeral) => "This local runtime uses TOFU and an ephemeral identity: re-enroll after restart.",
     }
 }
 

@@ -1,5 +1,5 @@
-//! Shared config-file loading/upsert/writing logic for `config add` and
-//! `capture` (spec §15 steps 2a/2b).
+//! Shared config-file loading/upsert/writing logic for trusted-PCR and TOFU
+//! `deployment add` flows (spec §15 steps 2a/2b).
 
 use std::path::Path;
 
@@ -49,8 +49,9 @@ pub fn load_or_create_config(path: &Path, node_id: Option<&str>) -> Result<Confi
             .with_context(|| format!("parsing config {}", path.display()))?;
         Ok(config)
     } else {
-        let node_id = node_id
-            .context("config file does not exist yet; --node-id is required to create a new one")?;
+        let node_id = node_id.context(
+            "config file does not exist yet; --canary-id is required to create a new one",
+        )?;
         Ok(Config {
             version: 0,
             node_id: node_id.to_string(),
@@ -67,7 +68,7 @@ pub fn upsert_target(config: &mut Config, target: Target, replace: bool) -> Resu
     if let Some(existing) = config.targets.iter_mut().find(|t| t.id == target.id) {
         if !replace {
             bail!(
-                "target {:?} already exists in config; pass --replace to overwrite it",
+                "deployment {:?} already exists in config; pass --replace to overwrite it",
                 target.id
             );
         }
@@ -138,10 +139,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_node_id_for_new_file_errors() {
-        let path = temp_path("missing-node-id");
+    fn missing_canary_id_for_new_file_errors() {
+        let path = temp_path("missing-canary-id");
         let err = load_or_create_config(&path, None).unwrap_err();
-        assert!(err.to_string().contains("node-id") || err.to_string().contains("node_id"));
+        assert!(err.to_string().contains("--canary-id"));
     }
 
     #[test]

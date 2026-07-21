@@ -1,4 +1,4 @@
-//! `canaryctl verify-statement` (spec §9, §15 step 6).
+//! `canaryctl artifact verify-statement` (spec §9, §15 step 6).
 //!
 //! Verification is deliberately offline in V0: the statement and public-key
 //! document come from local files, and the caller must obtain the keys through
@@ -13,12 +13,32 @@ use base64::Engine as _;
 use canary_core::keys::KeysDocument;
 use canary_core::statement::{verify_statement, Statement};
 use chrono::{DateTime, Utc};
+use serde_json::{json, Value};
 
 const PROTOCOL: &str = "caution-canary-v0";
 const ALG_ED25519: &str = "Ed25519";
 const ALG_ML_DSA_65: &str = "ML-DSA-65";
 
-pub fn run_offline(statement_path: &Path, keys_path: &Path) -> Result<()> {
+pub(crate) struct OfflineStatementOutcome {
+    target_id: String,
+    status: String,
+    expires_at: String,
+}
+
+impl OfflineStatementOutcome {
+    pub(crate) fn concise_text(&self) -> String {
+        format!(
+            "PARTIAL CHECK — statement signature valid\n{}  {}",
+            self.target_id, self.status
+        )
+    }
+
+    pub(crate) fn json_result(&self) -> Value {
+        json!({"partial": true, "target_id": self.target_id, "status": self.status, "expires_at": self.expires_at})
+    }
+}
+
+pub fn run_offline(statement_path: &Path, keys_path: &Path) -> Result<OfflineStatementOutcome> {
     let statement: Statement = load_json(statement_path)?;
     let keys: KeysDocument = load_json(keys_path)?;
     verify_and_report(&statement, &keys)
@@ -30,15 +50,16 @@ fn load_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
-fn verify_and_report(statement: &Statement, keys: &KeysDocument) -> Result<()> {
+fn verify_and_report(
+    statement: &Statement,
+    keys: &KeysDocument,
+) -> Result<OfflineStatementOutcome> {
     verify_at(statement, keys, Utc::now())?;
-
-    println!("PASS");
-    println!("  target_id:    {}", statement.payload.target_id);
-    println!("  status:       {:?}", statement.payload.status);
-    println!("  claim_type:   {}", statement.payload.claim_type);
-    println!("  expires_at:   {}", statement.payload.expires_at);
-    Ok(())
+    Ok(OfflineStatementOutcome {
+        target_id: statement.payload.target_id.clone(),
+        status: format!("{:?}", statement.payload.status).to_uppercase(),
+        expires_at: statement.payload.expires_at.clone(),
+    })
 }
 
 pub(crate) fn verify_at(

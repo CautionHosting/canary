@@ -95,15 +95,16 @@ caution verify \
 ```
 
 The resulting `.caution/trusted_hashes.json` is imported with
-`canaryctl config add --pcrs-file`. This gives the strongest V0 workflow: the baseline
+`canaryctl deployment add --pcrs`. This gives the strongest V0 workflow: the baseline
 is tied to an independently reproduced source tree before Canary monitors its
 continuity.
 
 ### Fast POC enrollment
 
-`canaryctl capture` may challenge the live target, extract candidate PCR0/1/2 from the
-signed document, validate its chain/signature/nonce using those candidate values,
-display them, require explicit confirmation, and write them to `canary.json`.
+`canaryctl deployment add --tofu` may challenge the live target, extract candidate
+PCR0/1/2 from the signed document, validate its chain/signature/nonce using those
+candidate values, display them, require explicit confirmation, and write them to
+`canary.json`.
 
 This is **trust on first use (TOFU)**. It proves only:
 
@@ -147,9 +148,9 @@ flowchart LR
 `canaryctl` runs outside the enclave and owns:
 
 - Creating and validating `canary.json`.
-- Explicit TOFU capture.
+- Explicit TOFU deployment enrollment.
 - Generating a random stable master seed for later Locksmith encryption.
-- Inspecting a deployed Canary's attestation, config and key bindings.
+- Enrolling a deployed Canary's attestation, config and key bindings.
 - Verifying signed statements and evidence bundles offline.
 
 Caution/Bootproof owns Canary's public `POST /attestation`. `canaryd` must not
@@ -313,22 +314,22 @@ not image measurements; they are runtime-bound to that measured enclave by signe
 3. Hash the canonical `config` member of `/config.json` and the canonical
    `/keys.json` document, then compare both attested digests.
 
-`canaryctl inspect-node --pcrs-file <verified-canary-pcrs> --keys-out <path>` automates
+`canaryctl enroll --pcrs <verified-canary-pcrs> --keys <path>` automates
 steps 2 and 3 and atomically saves the exact key document whose digest it verified.
-Its normal mode requires `--pcrs-file`, performs independent measurement
+Its normal mode requires `--pcrs`, performs independent measurement
 verification, and accepts only an HTTPS Canary origin.
 
-`canaryctl verify` and `verify-history` must require that separately enrolled key
-document through `--keys`. After verifying the live node as described above, they
-must require the live canonical `/keys.json` bytes to equal the pinned file before
-using the keys for either signature. This makes key continuity and rotation explicit;
-`inspect-node` is the only enrollment operation and never overwrites an existing pin.
+`canaryctl verify` must require that separately enrolled key document through `--keys`.
+After verifying the live node as described above, it must require the live canonical
+`/keys.json` bytes to equal the pinned file before using the keys for either signature.
+This makes key continuity and rotation explicit;
+`enroll` is the only enrollment operation and never overwrites an existing pin.
 
 `canaryctl verify` verifies each selected target's current published signed claim; it
 does not claim to verify the latest network attempt. A fresh definitive claim may
-remain current after a later transport failure. Its normal output must therefore show
-the command start time and, per target, the signed `observed_at`, `issued_at` and
-`expires_at` timestamps. `verify-history` remains the operation for one exact retained
+remain current after a later transport failure. Its `--verbose` output must show the
+command start time and, per target, the signed `observed_at`, `issued_at` and
+`expires_at` timestamps. `verify --attempt` is the operation for one exact retained
 attempt. These timestamps are signed Canary freshness fields, not an external
 timestamp-authority proof. Multiple selected targets are independently fetched and
 checked; the command must not imply an atomic aggregate snapshot.
@@ -344,21 +345,21 @@ The live report must distinguish:
 - an aggregated Nitro/nonce/PCR result from unsupported fictional per-subcheck
   results.
 
-An attested all-target success may be described as a full attested chain. An insecure
-success must instead say that it verified against a TOFU signer and unauthenticated
-config. Negative signed results and incomplete verification chains exit nonzero.
+An attested all-target success must identify the attested Canary trust input. An
+insecure success must instead say that it verified against a TOFU signer and
+unauthenticated config. Negative signed results and incomplete verification chains
+exit nonzero.
 
-For out-of-Caution test/demo deployments only, `inspect-node --insecure` and
+For out-of-Caution test/demo deployments only, `enroll --insecure` and
 `verify --insecure` may accept an HTTP origin and must skip Canary attestation
 entirely. They validate the served config digest, canonical key document, shared node
 identity and must warn that Canary workload identity is not established.
-`inspect-node --insecure` saves an explicit TOFU key pin; `verify --insecure` and
-`verify-history --insecure` require exact equality with that operator-provided
+`enroll --insecure` saves an explicit TOFU key pin; `verify --insecure` and
+`verify --attempt --insecure` require exact equality with that operator-provided
 `--keys` pin before validating target statements and evidence. Initial key enrollment
 remains TOFU. Target Nitro evidence is still replayed against PCR0/1/2 from the served
 config, but those expected PCRs are not an independently authenticated policy in this
-mode.
-`verify-evidence` provides no insecure mode.
+mode. `artifact verify-evidence` provides no insecure mode.
 
 ## 8. Signing and key management
 
@@ -374,7 +375,7 @@ CANARY_MASTER_SEED = env::vault("CANARY_MASTER_SEED")
 It is a unique, uniformly random 32-byte value encoded as base64. It must never be
 committed, logged, returned by an API or reused for another Canary identity.
 
-`canaryctl seed generate` creates it from the operating system CSPRNG for later
+`canaryctl identity create` creates it from the operating system CSPRNG for later
 Locksmith encryption.
 
 Ephemeral mode is selected only with the measured daemon argument:
@@ -710,21 +711,22 @@ caution verify \
   --save-pcrs
 
 # 2a. Add the independently verified values.
-canaryctl config add \
+canaryctl deployment add \
   --config canary.json \
-  --node-id caution-canary-demo \
+  --canary-id caution-canary-demo \
   --id payments-prod \
   --name "Payments production" \
-  --attestation-url https://payments.example.com/attestation \
-  --pcrs-file .caution/trusted_hashes.json
+  --url https://payments.example.com/attestation \
+  --pcrs .caution/trusted_hashes.json
 
-# 2b. Or, for the fast POC path only, capture a TOFU baseline.
-canaryctl capture \
+# 2b. Or, for the fast POC path only, enroll a TOFU baseline.
+canaryctl deployment add \
   --config canary.json \
-  --node-id caution-canary-demo \
+  --canary-id caution-canary-demo \
   --id payments-prod \
   --name "Payments production" \
-  --attestation-url https://payments.example.com/attestation
+  --url https://payments.example.com/attestation \
+  --tofu
 
 # Repeat 2a or 2b with another unique ID to monitor another enclave.
 
@@ -734,7 +736,7 @@ canaryctl capture \
 
 # 3b. Or provision a stable identity. Generate the root seed locally.
 #     Never commit .env.
-canaryctl seed generate --env-file .env
+canaryctl identity create --env-file .env
 
 # 4. Stable mode only: POC-only 1-of-1 Locksmith setup.
 caution secret keygen canary.asc \
@@ -753,21 +755,21 @@ caution verify --save-pcrs
 caution secret send-shard --keyring canary.private.asc
 
 # 6. Attest the Canary once and enroll its exact public signing keys.
-canaryctl inspect-node \
+canaryctl enroll \
   --url https://<canary-host> \
-  --pcrs-file .caution/trusted_hashes.json \
-  --keys-out canary-keys.json
+  --pcrs .caution/trusted_hashes.json \
+  --keys canary-keys.json
 
 # 7. Re-attest the Canary and verify every current target claim end to end,
 # requiring the independently enrolled keyset as well as the Canary PCRs.
 canaryctl verify \
   --url https://<canary-host> \
-  --pcrs-file .caution/trusted_hashes.json \
+  --pcrs .caution/trusted_hashes.json \
   --keys canary-keys.json
 
 # Lower-level/offline equivalents remain available.
 curl -fsS https://<canary-host>/targets/payments-prod/statement -o statement.json
-canaryctl verify-statement \
+canaryctl artifact verify-statement \
   --statement statement.json \
   --keys canary-keys.json
 ```
@@ -786,7 +788,7 @@ encrypted `.caution/secrets/`; ephemeral mode requires neither.
 - Implement canonical JSON digests and fixed claim semantics.
 - Implement master-seed parsing, HKDF child derivation and both signature algorithms.
 - Implement hybrid statement sign/verify with deterministic test vectors.
-- Implement `canaryctl config add`, `capture`, `seed generate` and offline verification.
+- Implement `canaryctl deployment add`, `identity create` and offline verification.
 
 Exit: config and statements round-trip reproducibly; replayed/wrong-nonce and either
 missing/invalid signature fail tests.
@@ -797,7 +799,7 @@ missing/invalid signature fail tests.
 - Implement the state machine, scheduler, jitter and immediate startup probes.
 - Add embedded SQLite migrations and bounded history.
 - Add the read-only JSON API, evidence endpoint and minimal HTML page.
-- Write attested metadata and add `inspect-node` digest checks.
+- Write attested metadata and add `enroll` digest checks.
 
 Exit: one local process monitors multiple fixtures/targets independently and exposes
 verifiable evidence and hybrid statements.
@@ -844,9 +846,9 @@ signatures without access to Caution internals.
     `caution verify`.
 14. README and CLI confirmation explicitly call live PCR capture TOFU and make no
     source-reproduction claim.
-15. The UI lists monitored targets before verification guidance, displays the exact
-    executable SHA-256, and selects attested versus TOFU instructions from the local
-    NSM-device hint while explicitly denying that the hint is remote proof.
+15. The UI lists monitored deployments before verification guidance, provides concise
+    local verification commands, and retains raw protocol artifacts as secondary
+    links.
 16. Fresh signed node metadata labels `identity_mode`; ephemeral startup rejects a
     simultaneous `CANARY_MASTER_SEED`, generates distinct keysets across starts and
     requires no Locksmith artifacts or shard release.

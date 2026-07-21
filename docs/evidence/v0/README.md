@@ -50,9 +50,10 @@ The completed record links to scrubbed output and exit status for:
   Buildx provenance metadata for the byte-level comparison.
 - `caution init`, deployment push, and `caution verify --save-pcrs` for Canary and
   each preferred-flow target.
-- `canaryctl inspect-node` with independently verified Canary PCRs.
-- Download plus offline `canaryctl verify-statement` and `verify-evidence` for each
-  target. The saved public keys must be the exact document verified by `inspect-node`.
+- `canaryctl enroll` with independently verified Canary PCRs.
+- Download plus offline `canaryctl artifact verify-statement` and
+  `artifact verify-evidence` for each target. The saved public keys must be the exact
+  document verified by `enroll`.
 - Standalone source/dependency audit showing no STEVE dependency/configuration and no
   direct NSM/Nitro attestation-generation path.
 
@@ -78,7 +79,7 @@ observed result and next action, and `Not run` is not completion evidence.
 | Expiry without persistent outage | `STALE` |  |  |
 | Valid probe after failure/outage | Immediate recovery |  |  |
 | Canary restart | History wiped, `PENDING`, immediate probes |  |  |
-| Metadata/config/key mismatch | `inspect-node` rejects it |  |  |
+| Metadata/config/key mismatch | `enroll` rejects it |  |  |
 | Config redeploy | New config digest/measurement; stable signer with retained seed |  |  |
 | SSRF controls | Prohibited address, redirect, oversized body and rebinding rejected |  |  |
 | TOFU demonstration | Explicit weaker-source-assurance warning retained |  |  |
@@ -98,7 +99,7 @@ links with an evaluator assertion.
 | [5](../../canary-v0-spec.md#17-acceptance-criteria) | Transport, TTL and `UNREACHABLE` scenario |
 | [6](../../canary-v0-spec.md#17-acceptance-criteria) | One-probe recovery scenario |
 | [7](../../canary-v0-spec.md#17-acceptance-criteria) | Expired/single-signature offline-verifier test |
-| [8](../../canary-v0-spec.md#17-acceptance-criteria) | Independent `inspect-node` result |
+| [8](../../canary-v0-spec.md#17-acceptance-criteria) | Independent `enroll` result |
 | [9](../../canary-v0-spec.md#17-acceptance-criteria) | Before/after config deployment record |
 | [10](../../canary-v0-spec.md#17-acceptance-criteria) | Restart lifecycle record |
 | [11](../../canary-v0-spec.md#17-acceptance-criteria) | SSRF/DNS-rebinding evidence |

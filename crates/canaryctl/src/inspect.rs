@@ -1,4 +1,4 @@
-//! `canaryctl inspect-node` — verify Canary's measured config/key binding.
+//! `canaryctl enroll` — verify Canary's measured config/key binding.
 
 use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
@@ -52,6 +52,49 @@ pub(crate) enum NodeTrust {
     UnattestedDev,
 }
 
+pub(crate) struct EnrollmentOutcome {
+    pub(crate) node_id: String,
+    pub(crate) config_digest: String,
+    pub(crate) keyset_digest: String,
+    trust: NodeTrust,
+    identity: Option<IdentityMode>,
+}
+
+impl EnrollmentOutcome {
+    pub(crate) fn trust_name(&self) -> &'static str {
+        match self.trust {
+            NodeTrust::Attested => "ATTESTED",
+            NodeTrust::UnattestedDev => "TOFU",
+        }
+    }
+
+    pub(crate) fn identity_name(&self) -> &'static str {
+        match self.identity {
+            Some(IdentityMode::Stable) => "stable",
+            Some(IdentityMode::Ephemeral) => "ephemeral",
+            None => "unknown",
+        }
+    }
+
+    pub(crate) fn verbose_text(&self, keys_path: &Path) -> String {
+        let trust = match self.trust {
+            NodeTrust::Attested => "fresh Nitro attestation and expected Canary PCR0/1/2 verified",
+            NodeTrust::UnattestedDev => {
+                "TOFU: Canary attestation and config authenticity were not verified"
+            }
+        };
+        format!(
+            "ENROLLED {}\n  trust: {}\n  identity: {}\n  keys: {}\n  config_digest: {}\n  keyset_digest: {}",
+            self.node_id,
+            trust,
+            self.identity_name(),
+            keys_path.display(),
+            self.config_digest,
+            self.keyset_digest
+        )
+    }
+}
+
 impl InspectedNode {
     pub(crate) fn get_json<T: DeserializeOwned>(&self, segments: &[&str]) -> Result<T> {
         let bytes = get(&self.agent, relative_endpoint(&self.base, segments)?)?;
@@ -89,7 +132,7 @@ impl InspectedNode {
             .with_context(|| format!("canonicalizing pinned Canary keys {}", path.display()))?;
         if canonical != pinned_bytes {
             bail!(
-                "pinned Canary keys {} are not exact RFC 8785 canonical bytes; use inspect-node --keys-out",
+                "pinned Canary keys {} are not exact RFC 8785 canonical bytes; use canaryctl enroll --keys",
                 path.display()
             );
         }
@@ -108,15 +151,15 @@ enum TrustMode<'a> {
     UnattestedDev,
 }
 
-pub fn run(
+pub(crate) fn enroll(
     base_url: &str,
     pcrs_file: Option<&Path>,
     insecure: bool,
     keys_out: &Path,
-) -> Result<()> {
+) -> Result<EnrollmentOutcome> {
     if keys_out.exists() {
         bail!(
-            "refusing to overwrite existing --keys-out {}; choose a new path",
+            "refusing to overwrite existing --keys {}; choose a new path",
             keys_out.display()
         );
     }
@@ -128,29 +171,13 @@ pub fn run(
     inspected
         .write_keys(keys_out)
         .with_context(|| format!("writing verified keys {}", keys_out.display()))?;
-    match mode {
-        TrustMode::TrustedPcrs(_) => {
-            println!("PASS: Canary config/key binding verified against independently trusted PCRs");
-        }
-        TrustMode::UnattestedDev => {
-            println!("PASS: public config and key documents are valid and agree on node identity");
-            println!("WARNING: --insecure skipped Canary attestation and allowed HTTP.");
-            println!("WARNING: Workload identity and config/key authenticity are NOT verified; keys_out is demo-only.");
-        }
-    }
-    println!("node_id: {}", inspected.config.config.node_id);
-    println!("config_digest: {}", inspected.config.config_digest);
-    println!("keyset_digest: {}", digest(&inspected.keys_bytes));
-    match inspected.metadata.as_ref().map(|value| value.identity_mode) {
-        Some(IdentityMode::Stable) => println!("identity_mode: stable"),
-        Some(IdentityMode::Ephemeral) => {
-            println!("identity_mode: ephemeral");
-            println!("WARNING: this key pin expires when canaryd restarts; enroll a new output file after restart.");
-        }
-        None => println!("identity_mode: unknown (Canary attestation skipped)"),
-    }
-    println!("keys_out: {}", keys_out.display());
-    Ok(())
+    Ok(EnrollmentOutcome {
+        node_id: inspected.config.config.node_id.clone(),
+        config_digest: inspected.config.config_digest.clone(),
+        keyset_digest: digest(&inspected.keys_bytes),
+        trust: inspected.trust,
+        identity: inspected.metadata.as_ref().map(|value| value.identity_mode),
+    })
 }
 
 pub(crate) fn inspect(base_url: &str, pcrs_file: &Path) -> Result<InspectedNode> {
@@ -287,7 +314,7 @@ fn validate_public_documents(
 fn write_verified_keys(path: &Path, keys_bytes: &[u8]) -> Result<()> {
     if path.exists() {
         bail!(
-            "refusing to overwrite existing --keys-out {}; choose a new path",
+            "refusing to overwrite existing --keys {}; choose a new path",
             path.display()
         );
     }
@@ -371,7 +398,7 @@ fn write_keys_no_clobber_with_suffixes(
     let name = path
         .file_name()
         .and_then(|value| value.to_str())
-        .context("--keys-out must have a UTF-8 file name")?;
+        .context("--keys must have a UTF-8 file name")?;
 
     let mut created = None;
     for _ in 0..MAX_TEMPORARY_ATTEMPTS {
@@ -405,7 +432,7 @@ fn write_keys_no_clobber_with_suffixes(
         drop(file);
         std::fs::hard_link(&temporary, path).with_context(|| {
             format!(
-                "creating --keys-out {} without replacing an existing file",
+                "creating --keys {} without replacing an existing file",
                 path.display()
             )
         })?;
@@ -428,7 +455,7 @@ fn select_trust_mode(pcrs_file: Option<&Path>, insecure: bool) -> Result<TrustMo
         (Some(path), false) => Ok(TrustMode::TrustedPcrs(path)),
         (None, true) => Ok(TrustMode::UnattestedDev),
         (Some(_), true) | (None, false) => {
-            bail!("pass exactly one of --pcrs-file or --insecure")
+            bail!("pass exactly one of --pcrs or --insecure")
         }
     }
 }

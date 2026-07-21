@@ -642,15 +642,16 @@ mod tests {
             "text/javascript; charset=utf-8"
         );
         let script = String::from_utf8(body).unwrap();
+        assert!(script.contains("canaryctl enroll"));
         assert!(script.contains("canaryctl verify"));
-        assert!(script.contains("canaryctl verify-statement"));
-        assert!(script.contains("canaryctl verify-evidence"));
-        assert!(script.contains("canaryctl verify-history"));
-        assert!(script.contains("ATTEMPT_ID"));
+        assert!(script.contains("--deployment"));
+        assert!(script.contains("--attempt"));
+        assert!(script.contains("--pcrs"));
         assert!(script.contains("--insecure"));
-        assert!(script.contains("runtimeEnvironment"));
+        assert!(script.contains("isNitroEnclave"));
         assert!(!script.contains("window.location.protocol"));
-        assert!(script.contains("requestJson(targetPath(name))"));
+        assert!(script.contains("requestJson(deploymentPath(\"history\"))"));
+        assert!(!script.contains("\\n+  --"));
         assert!(!script.contains("innerHTML"));
 
         let (status, _, body) = response(router(state), "/health").await;
@@ -803,42 +804,39 @@ mod tests {
         assert!(page.contains("<meta name=\"viewport\""));
         assert!(page.contains("<script src=\"/ui.js\" defer></script>"));
         assert!(page.contains("id=\"target-inspector\""));
-        assert!(page.contains("Canary’s signed claim"));
-        assert!(page.contains("The underlying proof material"));
-        assert!(page.contains("unsigned diagnostic data"));
-        assert!(page.contains("id=\"statement-command\""));
-        assert!(page.contains("id=\"evidence-command\""));
-        assert!(page.contains("id=\"history-command\""));
+        assert!(page.contains("data-tab=\"overview\""));
+        assert!(page.contains("data-tab=\"history\""));
+        assert!(page.contains("Current result"));
+        assert!(page.contains("Recorded attempts"));
+        assert!(page.contains("id=\"deployment-command\""));
         assert!(
-            page.find("id=\"statement-command\"").unwrap()
+            page.find("id=\"deployment-command\"").unwrap()
                 < page.find("id=\"statement-json-link\"").unwrap()
         );
         assert!(
-            page.find("id=\"evidence-command\"").unwrap()
+            page.find("id=\"statement-json-link\"").unwrap()
                 < page.find("id=\"evidence-json-link\"").unwrap()
         );
         assert!(
-            page.find("id=\"history-command\"").unwrap()
+            page.find("data-artifact-output").unwrap()
                 < page.find("id=\"history-json-link\"").unwrap()
         );
         assert!(!page.contains("01 / Claim"));
         assert!(!page.contains("02 / Proof"));
         assert!(!page.contains("03 / Diagnostics"));
+        assert!(!page.contains("data-tab=\"statement\""));
+        assert!(!page.contains("data-tab=\"evidence\""));
         assert!(page.contains("canaryctl verify"));
-        assert!(page.contains("canaryctl inspect-node"));
+        assert!(page.contains("canaryctl enroll"));
         assert!(page.contains("data-runtime-environment=\"non_enclave\""));
         assert!(page.contains("data-identity-mode=\"stable\""));
-        assert!(page.contains("Non-enclave runtime detected"));
-        assert!(page.contains("initial signing-key enrollment explicit trust on first use"));
-        assert!(
-            page.find("Monitored targets").unwrap() < page.find("Verify independently").unwrap()
-        );
+        assert!(page.contains("TOFU:"));
+        assert!(page.find("Deployments").unwrap() < page.find("Verify locally").unwrap());
         assert!(!page.contains("Continuity monitor / V0"));
         assert!(page.contains("--success: #5cff9d"));
         assert!(page.contains("class=\"target-card status-verified\""));
         assert!(page.contains("class=\"status-badge\""));
         assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;"));
-        assert!(page.contains("Raw Nitro evidence can expose infrastructure metadata"));
         assert!(page.contains("&quot;&lt;&amp;&#x27;"));
     }
 
@@ -857,10 +855,9 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let page = String::from_utf8(body).unwrap();
         assert!(page.contains("data-runtime-environment=\"nitro_enclave\""));
-        assert!(page.contains("Nitro enclave detected"));
+        assert!(page.contains("ATTESTED:"));
         assert!(page.contains("caution verify --save-pcrs"));
-        assert!(page.contains("--pcrs-file .caution/trusted_hashes.json"));
-        assert!(page.contains("canaryd / sha256:"));
+        assert!(page.contains("--pcrs .caution/trusted_hashes.json"));
         assert!(!page.contains("No Nitro device is visible"));
     }
 
@@ -878,8 +875,7 @@ mod tests {
         let page = String::from_utf8(body).unwrap();
         assert!(page.contains("data-identity-mode=\"ephemeral\""));
         assert!(page.contains("Ephemeral identity"));
-        assert!(page.contains("change on restart"));
-        assert!(page.contains("re-enroll a new key file"));
+        assert!(page.contains("ephemeral; enroll new keys after restart"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! `canaryctl seed generate` (spec §8.1, §15 step 3).
+//! `canaryctl identity create` (spec §8.1, §15 step 3).
 //!
 //! Generates the single random 32-byte `CANARY_MASTER_SEED` root secret from
 //! the OS CSPRNG and writes it to a local `.env`-style file for later
@@ -69,17 +69,6 @@ pub fn generate(env_file: &Path, force: bool) -> Result<()> {
 
     atomic_file::write(env_file, updated.as_bytes(), 0o600)
         .with_context(|| format!("writing env file {}", env_file.display()))?;
-
-    eprintln!(
-        "Generated a new {ENV_VAR} and wrote it to {}.",
-        env_file.display()
-    );
-    eprintln!(
-        "WARNING: never commit this file. This seed is the single root of the \
-         Canary signer identity (spec §8.1) — anyone who has it can derive \
-         both the Ed25519 and ML-DSA-65 signing keys for this node. Encrypt it \
-         with Locksmith before deployment and keep it out of version control."
-    );
 
     Ok(())
 }

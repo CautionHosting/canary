@@ -5,10 +5,30 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use canary_core::evidence::{pcrs_from_hex, verify_evidence, EvidenceBundle};
+use serde_json::{json, Value};
 
 use crate::config_cmd::TrustedHashesFile;
 
-pub fn run_offline(evidence_path: &Path, pcrs_path: &Path) -> Result<()> {
+pub(crate) struct OfflineEvidenceOutcome {
+    target_id: String,
+    observed_at: String,
+    evidence_digest: String,
+}
+
+impl OfflineEvidenceOutcome {
+    pub(crate) fn concise_text(&self) -> String {
+        format!(
+            "PARTIAL CHECK — evidence valid\n{}  observed {}",
+            self.target_id, self.observed_at
+        )
+    }
+
+    pub(crate) fn json_result(&self) -> Value {
+        json!({"partial": true, "target_id": self.target_id, "observed_at": self.observed_at, "evidence_digest": self.evidence_digest})
+    }
+}
+
+pub fn run_offline(evidence_path: &Path, pcrs_path: &Path) -> Result<OfflineEvidenceOutcome> {
     let text = std::fs::read_to_string(evidence_path)
         .with_context(|| format!("reading evidence bundle {}", evidence_path.display()))?;
     let bundle: EvidenceBundle = serde_json::from_str(&text)
@@ -40,12 +60,9 @@ pub fn run_offline(evidence_path: &Path, pcrs_path: &Path) -> Result<()> {
         );
     }
 
-    println!("PASS: Bootproof evidence is valid for the separately trusted PCRs");
-    println!("target_id: {}", bundle.target_id);
-    println!("observed_at: {}", bundle.observed_at);
-    println!("evidence_digest: {}", outcome.evidence_digest);
-    println!(
-        "Freshness is established only when this digest and observation time are bound by a trusted signed statement."
-    );
-    Ok(())
+    Ok(OfflineEvidenceOutcome {
+        target_id: bundle.target_id,
+        observed_at: bundle.observed_at,
+        evidence_digest: outcome.evidence_digest,
+    })
 }

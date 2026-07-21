@@ -8,53 +8,31 @@
     [...dialog.querySelectorAll("[data-panel]")].map((panel) => [panel.dataset.panel, panel]),
   );
   const tabs = [...dialog.querySelectorAll("[data-tab]")];
-  const runtimeEnvironment = document.body.dataset.runtimeEnvironment;
-  const isNitroEnclave = runtimeEnvironment === "nitro_enclave";
-  let currentTarget = null;
+  const isNitroEnclave = document.body.dataset.runtimeEnvironment === "nitro_enclave";
+  const byId = (id) => document.getElementById(id);
+  let currentDeployment = null;
   let loadGeneration = 0;
 
-  const byId = (id) => document.getElementById(id);
-
-  function targetPath(kind) {
-    return `/targets/${encodeURIComponent(currentTarget.id)}/${kind}`;
-  }
-
-  function artifactUrl(targetId, kind) {
-    return `${window.location.origin}/targets/${encodeURIComponent(targetId)}/${kind}`;
+  function deploymentPath(kind) {
+    return `/targets/${encodeURIComponent(currentDeployment.id)}/${kind}`;
   }
 
   function enrollmentCommand() {
-    if (!isNitroEnclave) {
-      return `canaryctl inspect-node --url ${window.location.origin} --insecure --keys-out canary-keys.json`;
-    }
-    return `caution verify --save-pcrs\n\ncanaryctl inspect-node --url ${window.location.origin} --pcrs-file .caution/trusted_hashes.json --keys-out canary-keys.json`;
+    if (!isNitroEnclave) return `canaryctl enroll --url ${window.location.origin} --insecure`;
+    return `caution verify --save-pcrs\n\ncanaryctl enroll --url ${window.location.origin} --pcrs .caution/trusted_hashes.json`;
   }
 
-  function verificationCommand(targetId) {
-    const target = targetId ? ` \\\n  --target ${targetId}` : "";
-    if (!isNitroEnclave) {
-      return `canaryctl verify \\\n  --url ${window.location.origin} \\\n  --insecure \\\n  --keys canary-keys.json${target}`;
-    }
-    return `canaryctl verify \\\n  --url ${window.location.origin} \\\n  --pcrs-file .caution/trusted_hashes.json \\\n  --keys canary-keys.json${target}`;
-  }
-
-  function statementVerificationCommand(targetId) {
-    return `curl -fsS '${artifactUrl(targetId, "statement")}' -o statement.json\n\ncanaryctl verify-statement \\\n  --statement statement.json \\\n  --keys canary-keys.json`;
-  }
-
-  function evidenceVerificationCommand(targetId) {
-    return `curl -fsS '${artifactUrl(targetId, "evidence")}' -o evidence.json\n\ncanaryctl verify-evidence \\\n  --evidence evidence.json \\\n  --pcrs-file .caution/trusted_hashes/${targetId}.json`;
-  }
-
-  function historyVerificationCommand(targetId, attemptId) {
+  function verificationCommand(deploymentId, attemptId) {
+    const deployment = deploymentId ? ` \\\n  --deployment ${deploymentId}` : "";
+    const attempt = attemptId ? ` \\\n  --attempt ${attemptId}` : "";
     const trust = isNitroEnclave
-      ? "--pcrs-file .caution/trusted_hashes.json"
+      ? "--pcrs .caution/trusted_hashes.json"
       : "--insecure";
-    return `canaryctl verify-history \\\n  --url ${window.location.origin} \\\n  ${trust} \\\n  --keys canary-keys.json \\\n  --target ${targetId} \\\n  --attempt ${attemptId}`;
+    return `canaryctl verify \\\n  --url ${window.location.origin} \\\n  ${trust}${deployment}${attempt}`;
   }
 
-  function setCommand(element, targetId) {
-    if (element) element.textContent = verificationCommand(targetId);
+  function setCommand(element, deploymentId) {
+    if (element) element.textContent = verificationCommand(deploymentId);
   }
 
   function setActiveTab(name) {
@@ -63,15 +41,12 @@
       tab.setAttribute("aria-selected", String(active));
       tab.tabIndex = active ? 0 : -1;
     }
-    for (const [panelName, panel] of panels) {
-      panel.hidden = panelName !== name;
-    }
-    if (name !== "target") loadArtifact(name);
+    for (const [panelName, panel] of panels) panel.hidden = panelName !== name;
+    if (name === "history") loadHistory();
   }
 
-  function setArtifactState(name, message, state = "loading") {
-    const panel = panels.get(name);
-    const output = panel?.querySelector("[data-artifact-output]");
+  function setHistoryState(message, state = "loading") {
+    const output = panels.get("history")?.querySelector("[data-artifact-output]");
     if (!output) return;
     output.dataset.state = state;
     output.textContent = message;
@@ -89,20 +64,8 @@
     } catch {
       throw new Error(`The endpoint returned non-JSON data (${response.status}).`);
     }
-    if (!response.ok) {
-      const reason = value?.error === "no_evidence"
-        ? "No evidence is attached to the current state. Pending, stale, unreachable, and some failed states legitimately have none."
-        : `The endpoint returned ${response.status}: ${value?.error || "request_failed"}.`;
-      throw new Error(reason);
-    }
+    if (!response.ok) throw new Error(`The endpoint returned ${response.status}: ${value?.error || "request_failed"}.`);
     return value;
-  }
-
-  function renderJson(name, value) {
-    const output = panels.get(name)?.querySelector("[data-artifact-output]");
-    if (!output) return;
-    output.dataset.state = "ready";
-    output.textContent = JSON.stringify(value, null, 2);
   }
 
   function appendCell(row, value, className) {
@@ -113,12 +76,10 @@
   }
 
   function renderHistory(value) {
-    const panel = panels.get("history");
-    const output = panel?.querySelector("[data-artifact-output]");
+    const output = panels.get("history")?.querySelector("[data-artifact-output]");
     if (!output) return;
     output.dataset.state = "ready";
     output.replaceChildren();
-
     const observations = Array.isArray(value?.observations) ? value.observations : [];
     if (observations.length === 0) {
       output.textContent = "No completed probe attempts are recorded for this process lifetime.";
@@ -128,7 +89,7 @@
     const table = document.createElement("table");
     const head = document.createElement("thead");
     const headerRow = document.createElement("tr");
-    for (const label of ["Attempted", "State", "Probe result", "Latency", "Evidence digest", "Replay"]) {
+    for (const label of ["Attempted", "State", "Result", "Latency", "Verify"]) {
       const th = document.createElement("th");
       th.scope = "col";
       th.textContent = label;
@@ -144,19 +105,14 @@
       appendCell(row, observation.status, `history-status history-status-${String(observation.status || "").toLowerCase()}`);
       appendCell(row, observation.attempt_reason);
       appendCell(row, observation.latency_ms == null ? "—" : `${observation.latency_ms} ms`);
-      appendCell(row, observation.evidence_digest, "digest-cell");
       const actions = document.createElement("td");
       actions.className = "history-actions";
-      const raw = document.createElement("a");
-      raw.className = "raw-link";
-      raw.href = `${targetPath("history")}/${observation.id}`;
-      raw.textContent = "Artifacts";
       const copy = document.createElement("button");
       copy.className = "copy-button";
       copy.type = "button";
-      copy.dataset.copyText = historyVerificationCommand(currentTarget.id, observation.id);
+      copy.dataset.copyText = verificationCommand(currentDeployment.id, observation.id);
       copy.textContent = "Copy CLI";
-      actions.append(raw, copy);
+      actions.append(copy);
       row.append(actions);
       body.append(row);
     }
@@ -164,32 +120,30 @@
     output.append(table);
   }
 
-  async function loadArtifact(name) {
-    const panel = panels.get(name);
-    if (!panel || panel.dataset.loaded === "true" || !currentTarget) return;
-
+  async function loadHistory() {
+    const panel = panels.get("history");
+    if (!panel || panel.dataset.loaded === "true" || !currentDeployment) return;
     const generation = loadGeneration;
-    setArtifactState(name, `Loading ${name}…`);
+    setHistoryState("Loading history…");
     try {
-      const value = await requestJson(targetPath(name));
+      const value = await requestJson(deploymentPath("history"));
       if (generation !== loadGeneration) return;
-      if (name === "history") renderHistory(value);
-      else renderJson(name, value);
+      renderHistory(value);
       panel.dataset.loaded = "true";
     } catch (error) {
       if (generation !== loadGeneration) return;
-      setArtifactState(name, error instanceof Error ? error.message : "Unable to load this artifact.", "error");
+      setHistoryState(error instanceof Error ? error.message : "Unable to load history.", "error");
     }
   }
 
   function setLink(id, kind) {
     const link = byId(id);
-    if (link) link.href = targetPath(kind);
+    if (link) link.href = deploymentPath(kind);
   }
 
-  function openTarget(card) {
+  function openDeployment(card) {
     loadGeneration += 1;
-    currentTarget = {
+    currentDeployment = {
       id: card.dataset.targetId,
       name: card.dataset.targetName,
       origin: card.dataset.targetOrigin,
@@ -200,30 +154,27 @@
       warning: card.dataset.targetWarning || "None",
     };
 
-    byId("inspector-kicker").textContent = currentTarget.id;
-    byId("inspector-title").textContent = currentTarget.name;
-    byId("inspector-status").textContent = currentTarget.status;
-    byId("inspector-status").className = `status-badge status-${currentTarget.status.toLowerCase()}`;
-    byId("inspector-origin").textContent = currentTarget.origin;
-    byId("inspector-reason").textContent = currentTarget.reason;
-    byId("inspector-observed").textContent = currentTarget.observed;
-    byId("inspector-expires").textContent = currentTarget.expires;
-    byId("inspector-warning").textContent = currentTarget.warning;
-    setCommand(byId("target-command"), currentTarget.id);
-    byId("statement-command").textContent = statementVerificationCommand(currentTarget.id);
-    byId("evidence-command").textContent = evidenceVerificationCommand(currentTarget.id);
-    byId("history-command").textContent = historyVerificationCommand(currentTarget.id, "ATTEMPT_ID");
+    byId("inspector-kicker").textContent = currentDeployment.id;
+    byId("inspector-title").textContent = currentDeployment.name;
+    byId("inspector-status").textContent = currentDeployment.status;
+    byId("inspector-status").className = `status-badge status-${currentDeployment.status.toLowerCase()}`;
+    byId("inspector-origin").textContent = currentDeployment.origin;
+    byId("inspector-reason").textContent = currentDeployment.reason;
+    byId("inspector-observed").textContent = currentDeployment.observed;
+    byId("inspector-expires").textContent = currentDeployment.expires;
+    byId("inspector-warning").textContent = currentDeployment.warning;
+    setCommand(byId("deployment-command"), currentDeployment.id);
     setLink("statement-json-link", "statement");
     setLink("evidence-json-link", "evidence");
     setLink("history-json-link", "history");
 
     for (const [name, panel] of panels) {
-      panel.dataset.loaded = name === "target" ? "true" : "false";
-      if (name !== "target") setArtifactState(name, "Select this view to load its current JSON.", "idle");
+      panel.dataset.loaded = name === "overview" ? "true" : "false";
+      if (name === "history") setHistoryState("Select this view to load recorded attempts.", "idle");
     }
-    setActiveTab("target");
+    setActiveTab("overview");
     dialog.showModal();
-    history.replaceState(null, "", `#target-${encodeURIComponent(currentTarget.id)}`);
+    history.replaceState(null, "", `#deployment-${encodeURIComponent(currentDeployment.id)}`);
   }
 
   async function copyText(button) {
@@ -252,16 +203,14 @@
     const openButton = event.target.closest("[data-open-target]");
     if (openButton) {
       const card = openButton.closest("[data-target-id]");
-      if (card) openTarget(card);
+      if (card) openDeployment(card);
       return;
     }
-
     const tab = event.target.closest("[data-tab]");
     if (tab) {
       setActiveTab(tab.dataset.tab);
       return;
     }
-
     const copyButton = event.target.closest("[data-copy], [data-copy-text]");
     if (copyButton) copyText(copyButton);
   });
@@ -271,7 +220,7 @@
     if (event.target === dialog) dialog.close();
   });
   dialog.addEventListener("close", () => {
-    currentTarget = null;
+    currentDeployment = null;
     loadGeneration += 1;
     history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
   });
@@ -281,8 +230,7 @@
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       event.preventDefault();
       const offset = event.key === "ArrowRight" ? 1 : -1;
-      const index = tabs.indexOf(tab);
-      const next = tabs[(index + offset + tabs.length) % tabs.length];
+      const next = tabs[(tabs.indexOf(tab) + offset + tabs.length) % tabs.length];
       next.focus();
       setActiveTab(next.dataset.tab);
     });
@@ -290,17 +238,17 @@
 
   const enrollment = document.querySelector("#enroll-command");
   if (enrollment) enrollment.textContent = enrollmentCommand();
-  setCommand(document.querySelector("#all-targets-command"), null);
+  setCommand(document.querySelector("#all-deployments-command"), null);
 
-  let hashTarget = "";
+  let hashDeployment = "";
   try {
-    hashTarget = decodeURIComponent(window.location.hash.replace(/^#target-/, ""));
+    hashDeployment = decodeURIComponent(window.location.hash.replace(/^#deployment-/, ""));
   } catch {
-    hashTarget = "";
+    hashDeployment = "";
   }
-  if (hashTarget && window.location.hash.startsWith("#target-")) {
+  if (hashDeployment && window.location.hash.startsWith("#deployment-")) {
     const card = [...document.querySelectorAll("[data-target-id]")]
-      .find((candidate) => candidate.dataset.targetId === hashTarget);
-    if (card) openTarget(card);
+      .find((candidate) => candidate.dataset.targetId === hashDeployment);
+    if (card) openDeployment(card);
   }
 })();

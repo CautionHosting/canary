@@ -1,4 +1,4 @@
-//! `canaryctl capture` — fast POC TOFU enrollment (spec §4, §15 step 2b).
+//! TOFU enrollment backing `canaryctl deployment add --tofu`.
 //!
 //! Challenges a live target's `/attestation` endpoint, extracts candidate
 //! PCR0/1/2 from the signed COSE_Sign1 document, validates the document's
@@ -6,8 +6,7 @@
 //! requires explicit human confirmation (or `--accept-tofu`) before writing
 //! them into `canary.json`. This is Trust On First Use: it proves only that
 //! future observations keep matching these live-enrolled values, never that
-//! they match reviewed or independently reproduced source (spec §4, README
-//! "Read this before enrolling PCRs").
+//! they match reviewed or independently reproduced source (spec §4).
 
 use std::io::{Read as _, Write as _};
 use std::path::Path;
@@ -27,6 +26,14 @@ use crate::config_cmd::{load_or_create_config, upsert_target, validate_and_write
 
 const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const MAX_ATTESTATION_RESPONSE_BYTES: usize = 256 * 1024;
+
+#[derive(Debug)]
+pub(crate) struct CaptureOutcome {
+    pub(crate) config_digest: String,
+    pub(crate) pcr0: String,
+    pub(crate) pcr1: String,
+    pub(crate) pcr2: String,
+}
 
 #[derive(Serialize)]
 struct NonceRequest {
@@ -50,7 +57,7 @@ pub fn run(
     node_id: Option<&str>,
     replace: bool,
     accept_tofu: bool,
-) -> Result<()> {
+) -> Result<CaptureOutcome> {
     let config = preflight_config(config_path, id, name, attestation_url, node_id, replace)?;
 
     let mut nonce_bytes = [0u8; 32];
@@ -124,7 +131,7 @@ fn preflight_config(
     )?;
     config
         .validate()
-        .context("proposed target failed validation; refusing network request")?;
+        .context("proposed deployment failed validation; refusing network request")?;
 
     Ok(config)
 }
@@ -133,13 +140,13 @@ fn preflight_config(
 fn enroll_response(
     config_path: &Path,
     id: &str,
-    attestation_url: &str,
+    _attestation_url: &str,
     mut config: Config,
     nonce_bytes: &[u8; 32],
     response_bytes: &[u8],
     now: std::time::Duration,
     accept_tofu: bool,
-) -> Result<()> {
+) -> Result<CaptureOutcome> {
     if response_bytes.len() > MAX_ATTESTATION_RESPONSE_BYTES {
         bail!("attestation response exceeds {MAX_ATTESTATION_RESPONSE_BYTES} byte limit");
     }
@@ -168,7 +175,7 @@ fn enroll_response(
         .targets
         .iter_mut()
         .find(|target| target.id == id)
-        .context("preflight target disappeared from config")?;
+        .context("preflight deployment disappeared from config")?;
     enrolled_target.expected_pcrs = ExpectedPcrs {
         pcr0: candidate.pcr0.clone(),
         pcr1: candidate.pcr1.clone(),
@@ -178,33 +185,23 @@ fn enroll_response(
         .validate()
         .context("captured PCR values failed config validation")?;
 
-    println!("Captured candidate PCRs from {attestation_url}:");
-    println!("  PCR0: {}", candidate.pcr0);
-    println!("  PCR1: {}", candidate.pcr1);
-    println!("  PCR2: {}", candidate.pcr2);
-    println!();
-    println!(
-        "This is trust on first use (TOFU). This command verified fresh Bootproof \
-         evidence and confirms the chain, signature and nonce are valid for the \
-         PCR values shown above. It proves only that future observations continue \
-         to match the exact values explicitly enrolled from this live endpoint."
-    );
-    println!(
-        "It does NOT prove that these values match reviewed or independently \
-         reproduced source. Run `caution verify --save-pcrs` first and use \
-         `canaryctl config add --pcrs-file` for that stronger workflow."
-    );
-
+    if !accept_tofu {
+        println!("Candidate PCRs from the live deployment:");
+        println!("  PCR0: {}", candidate.pcr0);
+        println!("  PCR1: {}", candidate.pcr1);
+        println!("  PCR2: {}", candidate.pcr2);
+        println!("WARNING: TOFU verifies fresh Nitro evidence, signatures, and nonce binding, but does not prove these values came from reviewed or reproduced source.");
+    }
     if !accept_tofu && !confirm_interactively()? {
         bail!("TOFU capture not confirmed; aborting without writing canary.json");
     }
 
-    let digest = validate_and_write(config_path, &config)?;
-
-    println!("Wrote {}", config_path.display());
-    println!("config_digest: {digest}");
-
-    Ok(())
+    Ok(CaptureOutcome {
+        config_digest: validate_and_write(config_path, &config)?,
+        pcr0: candidate.pcr0,
+        pcr1: candidate.pcr1,
+        pcr2: candidate.pcr2,
+    })
 }
 
 fn confirm_interactively() -> Result<bool> {

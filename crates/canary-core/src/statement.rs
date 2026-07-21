@@ -158,7 +158,7 @@ fn is_canonical_https_origin(value: &str) -> bool {
         && url.origin().ascii_serialization() == value
 }
 
-fn validate_payload(payload: &Payload) -> Result<(DateTime<Utc>, DateTime<Utc>), StatementError> {
+fn validate_identity_origin_and_digests(payload: &Payload) -> Result<(), StatementError> {
     if payload.claim_type != CLAIM_TYPE {
         return Err(StatementError::InvalidPayload(format!(
             "claim_type must be {CLAIM_TYPE:?}"
@@ -198,10 +198,14 @@ fn validate_payload(payload: &Payload) -> Result<(DateTime<Utc>, DateTime<Utc>),
             "evidence_digest must be a canonical sha256 digest".to_string(),
         ));
     }
+    Ok(())
+}
 
-    let issued_at = parse_timestamp(&payload.issued_at)?;
-    let expires_at = parse_timestamp(&payload.expires_at)?;
-    let anchor = match payload.status {
+fn validate_status_evidence(
+    payload: &Payload,
+    issued_at: DateTime<Utc>,
+) -> Result<DateTime<Utc>, StatementError> {
+    match payload.status {
         Status::Verified | Status::Failed => {
             let observed_at = payload.observed_at.as_deref().ok_or_else(|| {
                 StatementError::InvalidPayload(
@@ -219,7 +223,7 @@ fn validate_payload(payload: &Payload) -> Result<(DateTime<Utc>, DateTime<Utc>),
                     "observed_at must not be later than issued_at".to_string(),
                 ));
             }
-            observed_at
+            Ok(observed_at)
         }
         Status::Pending | Status::Unreachable | Status::Stale => {
             if payload.observed_at.is_some() || payload.evidence_digest.is_some() {
@@ -227,10 +231,12 @@ fn validate_payload(payload: &Payload) -> Result<(DateTime<Utc>, DateTime<Utc>),
                     "PENDING, UNREACHABLE and STALE must not carry target evidence".to_string(),
                 ));
             }
-            issued_at
+            Ok(issued_at)
         }
-    };
+    }
+}
 
+fn validate_status_reason(payload: &Payload) -> Result<(), StatementError> {
     if payload.status == Status::Verified && payload.reason != "ALL_CHECKS_PASSED" {
         return Err(StatementError::InvalidPayload(
             "VERIFIED requires ALL_CHECKS_PASSED".to_string(),
@@ -241,8 +247,15 @@ fn validate_payload(payload: &Payload) -> Result<(DateTime<Utc>, DateTime<Utc>),
             "ALL_CHECKS_PASSED is valid only for VERIFIED".to_string(),
         ));
     }
+    Ok(())
+}
 
-    let expected_expiry = anchor
+fn validate_expiry_timestamps(
+    issued_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    definitive_timestamp: DateTime<Utc>,
+) -> Result<(), StatementError> {
+    let expected_expiry = definitive_timestamp
         .checked_add_signed(chrono::Duration::seconds(STATEMENT_TTL_SECONDS))
         .ok_or_else(|| {
             StatementError::InvalidPayload("definitive timestamp is out of range".to_string())
@@ -257,6 +270,17 @@ fn validate_payload(payload: &Payload) -> Result<(DateTime<Utc>, DateTime<Utc>),
             "issued_at must not be later than expires_at".to_string(),
         ));
     }
+    Ok(())
+}
+
+fn validate_payload(payload: &Payload) -> Result<(DateTime<Utc>, DateTime<Utc>), StatementError> {
+    validate_identity_origin_and_digests(payload)?;
+
+    let issued_at = parse_timestamp(&payload.issued_at)?;
+    let expires_at = parse_timestamp(&payload.expires_at)?;
+    let definitive_timestamp = validate_status_evidence(payload, issued_at)?;
+    validate_status_reason(payload)?;
+    validate_expiry_timestamps(issued_at, expires_at, definitive_timestamp)?;
 
     Ok((issued_at, expires_at))
 }
@@ -656,13 +680,113 @@ mod tests {
     }
 
     #[test]
-    fn wrong_claim_type_is_rejected_before_signing() {
-        let ks = test_keyset();
-        let mut payload = verified_payload();
-        payload.claim_type = "not-the-v0-claim".to_string();
+    fn invalid_payloads_are_rejected_in_validation_order() {
+        type InvalidPayloadCase = (&'static str, fn(&mut Payload), &'static str);
 
-        let err = sign_statement(payload, &ks).unwrap_err();
-        assert!(matches!(err, StatementError::InvalidPayload(_)));
+        let cases: [InvalidPayloadCase; 16] = [
+            (
+                "claim type",
+                |payload| payload.claim_type = "not-the-v0-claim".to_string(),
+                "claim_type must be \"caution.canary.pcr-match.v0\"",
+            ),
+            (
+                "key epoch",
+                |payload| payload.key_epoch = KEY_EPOCH + 1,
+                "key_epoch must be 0 in V0",
+            ),
+            (
+                "target identifier",
+                |payload| payload.target_id = "not an identifier".to_string(),
+                "target_id and verifier_id must be canonical ASCII identifiers",
+            ),
+            (
+                "verifier identifier",
+                |payload| payload.verifier_id = "not an identifier".to_string(),
+                "target_id and verifier_id must be canonical ASCII identifiers",
+            ),
+            (
+                "empty reason",
+                |payload| payload.reason.clear(),
+                "reason must be non-empty",
+            ),
+            (
+                "origin",
+                |payload| {
+                    payload.target_origin = "https://payments.example.com/attestation".to_string()
+                },
+                "target_origin must be a canonical HTTPS origin without a trailing slash",
+            ),
+            (
+                "config digest",
+                |payload| payload.config_digest = "sha256:ABC".to_string(),
+                "config_digest must be a canonical sha256 digest",
+            ),
+            (
+                "evidence digest",
+                |payload| payload.evidence_digest = Some("sha256:ABC".to_string()),
+                "evidence_digest must be a canonical sha256 digest",
+            ),
+            (
+                "VERIFIED without observed_at",
+                |payload| payload.observed_at = None,
+                "VERIFIED and FAILED require observed_at",
+            ),
+            (
+                "VERIFIED without evidence",
+                |payload| payload.evidence_digest = None,
+                "VERIFIED requires evidence_digest",
+            ),
+            (
+                "non-definitive status carrying evidence",
+                |payload| {
+                    payload.status = Status::Pending;
+                    payload.reason = "PENDING".to_string();
+                    payload.observed_at = None;
+                },
+                "PENDING, UNREACHABLE and STALE must not carry target evidence",
+            ),
+            (
+                "observation after issuance",
+                |payload| payload.observed_at = Some("2026-07-17T12:01:00Z".to_string()),
+                "observed_at must not be later than issued_at",
+            ),
+            (
+                "VERIFIED reason binding",
+                |payload| payload.reason = "PCR_MISMATCH".to_string(),
+                "VERIFIED requires ALL_CHECKS_PASSED",
+            ),
+            (
+                "ALL_CHECKS_PASSED on a non-VERIFIED status",
+                |payload| {
+                    payload.status = Status::Unreachable;
+                    payload.observed_at = None;
+                    payload.evidence_digest = None;
+                },
+                "ALL_CHECKS_PASSED is valid only for VERIFIED",
+            ),
+            (
+                "lifetime other than exactly 180 seconds",
+                |payload| payload.expires_at = "2026-07-17T12:02:00Z".to_string(),
+                "expires_at must be exactly 180 seconds after the definitive timestamp",
+            ),
+            (
+                "issuance after expiry",
+                |payload| payload.issued_at = "2026-07-17T12:04:00Z".to_string(),
+                "issued_at must not be later than expires_at",
+            ),
+        ];
+
+        for (name, mutate, expected) in cases {
+            let mut payload = verified_payload();
+            mutate(&mut payload);
+
+            let err = validate_payload(&payload).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("invalid statement payload: {expected}"),
+                "case: {name}"
+            );
+        }
     }
 
     #[test]

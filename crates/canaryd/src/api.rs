@@ -643,7 +643,10 @@ mod tests {
         );
         let script = String::from_utf8(body).unwrap();
         assert!(script.contains("canaryctl verify"));
+        assert!(script.contains("canaryctl verify-statement"));
+        assert!(script.contains("canaryctl verify-evidence"));
         assert!(script.contains("canaryctl verify-history"));
+        assert!(script.contains("ATTEMPT_ID"));
         assert!(script.contains("--insecure"));
         assert!(script.contains("runtimeEnvironment"));
         assert!(!script.contains("window.location.protocol"));
@@ -803,6 +806,24 @@ mod tests {
         assert!(page.contains("Canary’s signed claim"));
         assert!(page.contains("The underlying proof material"));
         assert!(page.contains("unsigned diagnostic data"));
+        assert!(page.contains("id=\"statement-command\""));
+        assert!(page.contains("id=\"evidence-command\""));
+        assert!(page.contains("id=\"history-command\""));
+        assert!(
+            page.find("id=\"statement-command\"").unwrap()
+                < page.find("id=\"statement-json-link\"").unwrap()
+        );
+        assert!(
+            page.find("id=\"evidence-command\"").unwrap()
+                < page.find("id=\"evidence-json-link\"").unwrap()
+        );
+        assert!(
+            page.find("id=\"history-command\"").unwrap()
+                < page.find("id=\"history-json-link\"").unwrap()
+        );
+        assert!(!page.contains("01 / Claim"));
+        assert!(!page.contains("02 / Proof"));
+        assert!(!page.contains("03 / Diagnostics"));
         assert!(page.contains("canaryctl verify"));
         assert!(page.contains("canaryctl inspect-node"));
         assert!(page.contains("data-runtime-environment=\"non_enclave\""));

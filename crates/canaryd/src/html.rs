@@ -57,7 +57,7 @@ a:hover { color: var(--accent-bright); }
 [hidden] { display: none !important; }
 
 .shell { width: min(1180px, 100%); margin: 0 auto; padding: 64px 28px 84px; }
-.eyebrow, .label, dt, .guide-number, .panel-kicker {
+.eyebrow, .label, dt, .panel-kicker {
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
@@ -94,7 +94,7 @@ h1 { margin: 0; color: #f2f8fa; font-size: clamp(34px, 5vw, 54px); font-weight: 
 .trust-note strong { color: var(--warning); font-weight: 650; }
 .trust-note p { margin: 0; color: #aab7be; }
 
-.verify-box { margin: 0 0 46px; padding: 22px; border: 1px solid rgba(99, 220, 255, .25); background: linear-gradient(135deg, rgba(99, 220, 255, .07), rgba(14, 21, 27, .6)); }
+.verify-box { margin: 0 0 46px; padding: 22px; border: 1px solid var(--border); background: rgba(14, 21, 27, .38); }
 .verify-box-head { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; margin-bottom: 12px; }
 .verify-box h2, .section-heading h2 { margin: 0; color: #edf5f8; font-size: 17px; font-weight: 550; }
 .verify-box p { max-width: 820px; margin: 0 0 15px; color: #9dadb5; }
@@ -103,24 +103,17 @@ h1 { margin: 0; color: #f2f8fa; font-size: clamp(34px, 5vw, 54px); font-weight: 
 .verification-layers { margin: 18px 0 0; padding-left: 22px; color: #9dadb5; }
 .verification-layers li { margin: 7px 0; padding-left: 5px; }
 .verification-layers strong { color: var(--text); }
-.command-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; border: 1px solid var(--border-strong); background: #070b0e; }
-.command-row pre { margin: 0; padding: 14px 16px; overflow: auto; color: var(--accent-bright); white-space: pre-wrap; overflow-wrap: anywhere; }
+.command-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; border: 1px solid var(--border); background: rgba(7, 11, 14, .72); }
+.command-row pre { margin: 0; padding: 14px 16px; overflow: auto; color: #a8c5ce; white-space: pre-wrap; overflow-wrap: anywhere; }
 .copy-button, .close-button, .open-target, .tab {
   color: var(--text);
   background: transparent;
   border: 0;
   cursor: pointer;
 }
-.copy-button { padding: 0 17px; color: var(--accent); border-left: 1px solid var(--border-strong); }
-.copy-button:hover { background: var(--accent-soft); }
+.copy-button { padding: 0 17px; color: #75adbd; border-left: 1px solid var(--border); }
+.copy-button:hover { color: #a8d5e0; background: rgba(99, 220, 255, .045); }
 .command-note { margin: 10px 0 0 !important; color: var(--muted) !important; font-size: 11px; }
-
-.artifact-guide { display: grid; grid-template-columns: repeat(3, 1fr); margin-bottom: 48px; border: 1px solid var(--border); }
-.guide-item { min-width: 0; padding: 20px; background: rgba(14, 21, 27, .55); }
-.guide-item + .guide-item { border-left: 1px solid var(--border); }
-.guide-number { color: var(--accent); }
-.guide-item h2 { margin: 8px 0 7px; color: #edf5f8; font-size: 15px; font-weight: 600; }
-.guide-item p { margin: 0; color: #91a1a9; font-size: 12px; }
 
 .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
 .targets-section { margin-bottom: 48px; }
@@ -182,20 +175,19 @@ dialog::backdrop { background: rgba(1, 5, 8, .82); backdrop-filter: blur(5px); }
 .history-status-pending { color: var(--warning); }
 .history-actions { display: flex; align-items: center; gap: 8px; }
 .history-actions .copy-button { padding: 5px 7px; white-space: nowrap; }
-.target-command-box { margin: 26px 0 0 184px; }
-.target-command-box h3 { margin: 0 0 10px; color: #eef5f7; font-size: 13px; font-weight: 600; }
+.panel-verify { margin: 0 0 18px 184px; padding: 14px; background: rgba(8, 12, 16, .28); border: 1px solid var(--border); }
+.panel-verify h3 { margin: 0 0 6px; color: #cbd7dc; font-size: 13px; font-weight: 600; }
+.panel-verify p { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
+.target-command-box { margin-top: 26px; margin-bottom: 0; }
 
 @media (max-width: 820px) {
   .shell { padding: 42px 18px 58px; }
   .topline { display: block; }
   .raw-nav { justify-content: flex-start; margin-top: 24px; }
-  .node-meta, .targets, .artifact-guide { grid-template-columns: 1fr; }
-  .artifact-guide { border: 0; gap: 10px; }
-  .guide-item { border: 1px solid var(--border); }
-  .guide-item + .guide-item { border-left: 1px solid var(--border); }
+  .node-meta, .targets { grid-template-columns: 1fr; }
   .meta-item--wide { grid-column: auto; }
   .panel-intro { grid-template-columns: 1fr; gap: 8px; }
-  .panel-links, .inspector-details, .target-command-box { margin-left: 0; }
+  .panel-links, .inspector-details, .panel-verify { margin-left: 0; }
 }
 
 @media (max-width: 520px) {
@@ -239,20 +231,23 @@ const INSPECTOR: &str = r##"</main>
         <div class="detail"><dt>Claim expires</dt><dd id="inspector-expires"></dd></div>
         <div class="detail"><dt>Transport warning</dt><dd id="inspector-warning"></dd></div>
       </dl>
-      <div class="target-command-box"><h3>Verify this target independently</h3><div class="command-row"><pre id="target-command"></pre><button class="copy-button" type="button" data-copy="#target-command">Copy</button></div></div>
+      <div class="panel-verify target-command-box"><h3>Verify this target locally</h3><div class="command-row"><pre id="target-command"></pre><button class="copy-button" type="button" data-copy="#target-command">Copy</button></div></div>
     </section>
     <section class="panel" data-panel="statement" role="tabpanel" hidden>
       <div class="panel-intro"><h3>Canary’s signed claim</h3><p>The statement says <strong>what Canary concluded</strong>. Its Ed25519 and ML-DSA-65 signatures cover the target identity, result, config digest, evidence digest, observation time, expiry, verifier identity, and key epoch. A valid signature authenticates the claim; it does not replace checking the linked evidence.</p></div>
+      <div class="panel-verify"><h3>Verify this statement locally</h3><p>Download it and check both signatures with the enrolled Canary keys.</p><div class="command-row"><pre id="statement-command"></pre><button class="copy-button" type="button" data-copy="#statement-command">Copy</button></div></div>
       <div class="panel-links"><a class="raw-link" id="statement-json-link" href="#">Open raw statement JSON</a></div>
       <pre class="artifact-output" data-artifact-output data-state="idle">Select this view to load its current JSON.</pre>
     </section>
     <section class="panel" data-panel="evidence" role="tabpanel" hidden>
       <div class="panel-intro"><h3>The underlying proof material</h3><p>Evidence is <strong>the target’s raw Bootproof/Nitro attestation bundle</strong>, including the nonce and document Canary checked against configured PCR0/1/2. It is not Canary’s conclusion. The signed statement binds its digest and observation time so the two artifacts cannot be silently mixed. Raw Nitro evidence can expose infrastructure metadata.</p></div>
+      <div class="panel-verify"><h3>Verify this evidence locally</h3><p>Download it and replay verification with independently trusted target PCRs.</p><div class="command-row"><pre id="evidence-command"></pre><button class="copy-button" type="button" data-copy="#evidence-command">Copy</button></div></div>
       <div class="panel-links"><a class="raw-link" id="evidence-json-link" href="#">Open raw evidence JSON</a></div>
       <pre class="artifact-output" data-artifact-output data-state="idle">Select this view to load its current JSON.</pre>
     </section>
     <section class="panel" data-panel="history" role="tabpanel" hidden>
       <div class="panel-intro"><h3>Recorded attempts and replay</h3><p>History summaries are <strong>unsigned diagnostic data</strong>, but each decodable attempt retains its exact signed statement and nonce-bound evidence. Open an attempt’s artifacts or copy its <code>canaryctl verify-history</code> command to reproduce the cryptographic result locally. Transport and undecodable-response failures have no target evidence to replay.</p></div>
+      <div class="panel-verify"><h3>Verify a historical attempt locally</h3><p>Replace the attempt ID with one listed below.</p><div class="command-row"><pre id="history-command"></pre><button class="copy-button" type="button" data-copy="#history-command">Copy</button></div></div>
       <div class="panel-links"><a class="raw-link" id="history-json-link" href="#">Open raw history JSON</a></div>
       <div class="artifact-output" data-artifact-output data-state="idle">Select this view to load its current JSON.</div>
     </section>
@@ -355,7 +350,6 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
     }
 
     page.push_str("</div></section>");
-    page.push_str("<section class=\"artifact-guide\" aria-label=\"Artifact guide\"><article class=\"guide-item\"><span class=\"guide-number\">01 / Claim</span><h2>Statement</h2><p>Canary’s short-lived, hybrid-signed conclusion. It binds the target, policy config, result, evidence digest, and time.</p></article><article class=\"guide-item\"><span class=\"guide-number\">02 / Proof</span><h2>Evidence</h2><p>The raw nonce-bound Nitro material Canary evaluated. It proves nothing about Canary’s conclusion until linked and checked.</p></article><article class=\"guide-item\"><span class=\"guide-number\">03 / Diagnostics</span><h2>History</h2><p>Unsigned process-lifetime observations for understanding changes. Useful context, not durable cryptographic proof.</p></article></section>");
     push_verification_guide(
         &mut page,
         snapshot.runtime.environment,

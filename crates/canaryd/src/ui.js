@@ -19,6 +19,10 @@
     return `/targets/${encodeURIComponent(currentTarget.id)}/${kind}`;
   }
 
+  function artifactUrl(targetId, kind) {
+    return `${window.location.origin}/targets/${encodeURIComponent(targetId)}/${kind}`;
+  }
+
   function enrollmentCommand() {
     if (!isNitroEnclave) {
       return `canaryctl inspect-node --url ${window.location.origin} --insecure --keys-out canary-keys.json`;
@@ -32,6 +36,14 @@
       return `canaryctl verify \\\n  --url ${window.location.origin} \\\n  --insecure \\\n  --keys canary-keys.json${target}`;
     }
     return `canaryctl verify \\\n  --url ${window.location.origin} \\\n  --pcrs-file .caution/trusted_hashes.json \\\n  --keys canary-keys.json${target}`;
+  }
+
+  function statementVerificationCommand(targetId) {
+    return `curl -fsS '${artifactUrl(targetId, "statement")}' -o statement.json\n\ncanaryctl verify-statement \\\n  --statement statement.json \\\n  --keys canary-keys.json`;
+  }
+
+  function evidenceVerificationCommand(targetId) {
+    return `curl -fsS '${artifactUrl(targetId, "evidence")}' -o evidence.json\n\ncanaryctl verify-evidence \\\n  --evidence evidence.json \\\n  --pcrs-file .caution/trusted_hashes/${targetId}.json`;
   }
 
   function historyVerificationCommand(targetId, attemptId) {
@@ -198,6 +210,9 @@
     byId("inspector-expires").textContent = currentTarget.expires;
     byId("inspector-warning").textContent = currentTarget.warning;
     setCommand(byId("target-command"), currentTarget.id);
+    byId("statement-command").textContent = statementVerificationCommand(currentTarget.id);
+    byId("evidence-command").textContent = evidenceVerificationCommand(currentTarget.id);
+    byId("history-command").textContent = historyVerificationCommand(currentTarget.id, "ATTEMPT_ID");
     setLink("statement-json-link", "statement");
     setLink("evidence-json-link", "evidence");
     setLink("history-json-link", "history");

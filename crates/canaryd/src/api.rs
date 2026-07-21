@@ -108,6 +108,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/targets/{id}/statement", get(statement))
         .route("/targets/{id}/evidence", get(evidence))
         .route("/targets/{id}/history", get(history))
+        .route(
+            "/targets/{id}/history/{attempt_id}",
+            get(historical_attempt),
+        )
         .route("/config.json", get(config))
         .route("/keys.json", get(keys))
         .fallback(not_found)
@@ -208,12 +212,50 @@ async fn history(Path(id): Path<String>, State(state): State<ApiState>) -> Respo
                 observations: history,
             },
         ),
-        Err(_) => json_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ErrorBody {
-                error: "internal_error",
-            },
-        ),
+        Err(error) => {
+            tracing::error!(
+                target_id = %id,
+                error = %error,
+                "failed to load target history"
+            );
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "internal_error",
+                },
+            )
+        }
+    }
+}
+
+async fn historical_attempt(
+    Path((id, attempt_id)): Path<(String, i64)>,
+    State(state): State<ApiState>,
+) -> Response {
+    if let Some(response) = not_ready(&state) {
+        return response;
+    }
+    let snapshot = state.snapshot().await;
+    if target(&snapshot, &id).is_none() {
+        return not_found_response();
+    }
+    match state.store.historical_attempt(&id, attempt_id).await {
+        Ok(Some(attempt)) => json_response(StatusCode::OK, attempt),
+        Ok(None) => not_found_response(),
+        Err(error) => {
+            tracing::error!(
+                target_id = %id,
+                attempt_id,
+                error = %error,
+                "failed to load historical attempt"
+            );
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "internal_error",
+                },
+            )
+        }
     }
 }
 
@@ -582,6 +624,8 @@ mod tests {
         );
         let script = String::from_utf8(body).unwrap();
         assert!(script.contains("canaryctl verify"));
+        assert!(script.contains("canaryctl verify-history"));
+        assert!(script.contains("--insecure"));
         assert!(script.contains("requestJson(targetPath(name))"));
         assert!(!script.contains("innerHTML"));
 
@@ -672,6 +716,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn historical_attempt_exposes_exact_replayable_artifacts() {
+        let state = state(true).await;
+        let exact_evidence = evidence();
+        let exact_statement = target(Some(exact_evidence.clone())).statement;
+        let receipt = state
+            .store
+            .commit(AttemptWrite {
+                target: target(Some(exact_evidence.clone())),
+                attempted_at: at(0),
+                attempt_reason: "INVALID_SIGNATURE".to_owned(),
+                attempt_observed_at: Some(at(0)),
+                attempt_evidence: Some(exact_evidence.clone()),
+                attempt_transport_warning: None,
+                latency_ms: Some(1),
+                config_digest: config().config_digest,
+            })
+            .await
+            .unwrap();
+        state.set_ready(true);
+
+        let uri = format!("/targets/target-a/history/{}", receipt.attempt_id);
+        let (status, _, body) = response(router(state.clone()), &uri).await;
+        assert_eq!(status, StatusCode::OK);
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["observation"]["attempt_reason"], "INVALID_SIGNATURE");
+        assert_eq!(
+            serde_json::from_value::<Statement>(value["statement"].clone()).unwrap(),
+            exact_statement
+        );
+        assert_eq!(
+            serde_json::from_value::<EvidenceBundle>(value["evidence"].clone()).unwrap(),
+            exact_evidence
+        );
+
+        let (status, _, body) = response(router(state), "/targets/target-a/history/999999").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, br#"{"error":"not_found"}"#);
+    }
+
+    #[tokio::test]
     async fn html_escapes_configuration_derived_strings_and_shows_warning() {
         let state = state(true).await;
         let mut injected = target(Some(evidence()));
@@ -699,6 +783,7 @@ mod tests {
         assert!(page.contains("The underlying proof material"));
         assert!(page.contains("unsigned diagnostic data"));
         assert!(page.contains("canaryctl verify"));
+        assert!(page.contains("--success: #5cff9d"));
         assert!(page.contains("class=\"target-card status-verified\""));
         assert!(page.contains("class=\"status-badge\""));
         assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;"));

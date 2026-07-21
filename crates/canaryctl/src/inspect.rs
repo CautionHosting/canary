@@ -19,7 +19,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::attestation::extract_candidate_pcrs;
 use crate::config_cmd::TrustedHashesFile;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -40,10 +39,16 @@ struct AttestationResponse {
 pub(crate) struct InspectedNode {
     pub(crate) config: ConfigDocument,
     pub(crate) keys: KeysDocument,
-    pub(crate) metadata: NodeMetadata,
     pub(crate) keys_bytes: Vec<u8>,
+    pub(crate) trust: NodeTrust,
     agent: ureq::Agent,
     base: Url,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NodeTrust {
+    Attested,
+    UnattestedDev,
 }
 
 impl InspectedNode {
@@ -67,11 +72,38 @@ impl InspectedNode {
     pub(crate) fn write_keys(&self, path: &Path) -> Result<()> {
         write_verified_keys(path, &self.keys_bytes)
     }
+
+    /// Require an operator-enrolled key document to exactly match the live
+    /// canonical keyset. In attested mode this adds continuity to the fresh
+    /// attestation binding; in demo mode it is the sole TOFU key pin.
+    pub(crate) fn verify_pinned_keys(&self, path: &Path) -> Result<()> {
+        let pinned_bytes = std::fs::read(path)
+            .with_context(|| format!("reading pinned Canary keys {}", path.display()))?;
+        let pinned: KeysDocument = serde_json::from_slice(&pinned_bytes)
+            .with_context(|| format!("parsing pinned Canary keys {}", path.display()))?;
+        validate_keys_document(&pinned)
+            .with_context(|| format!("validating pinned Canary keys {}", path.display()))?;
+        let canonical = canonicalize(&pinned)
+            .with_context(|| format!("canonicalizing pinned Canary keys {}", path.display()))?;
+        if canonical != pinned_bytes {
+            bail!(
+                "pinned Canary keys {} are not exact RFC 8785 canonical bytes; use inspect-node --keys-out",
+                path.display()
+            );
+        }
+        if pinned_bytes != self.keys_bytes {
+            bail!(
+                "live Canary keyset does not match pinned --keys {}; refuse key substitution or unapproved rotation",
+                path.display()
+            );
+        }
+        Ok(())
+    }
 }
 
 enum TrustMode<'a> {
     TrustedPcrs(&'a Path),
-    SelfPinned,
+    UnattestedDev,
 }
 
 pub fn run(
@@ -87,7 +119,10 @@ pub fn run(
         );
     }
     let mode = select_trust_mode(pcrs_file, insecure)?;
-    let inspected = inspect_with_mode(base_url, &mode)?;
+    let inspected = match mode {
+        TrustMode::TrustedPcrs(path) => inspect(base_url, path)?,
+        TrustMode::UnattestedDev => inspect_unattested(base_url)?,
+    };
     inspected
         .write_keys(keys_out)
         .with_context(|| format!("writing verified keys {}", keys_out.display()))?;
@@ -95,42 +130,31 @@ pub fn run(
         TrustMode::TrustedPcrs(_) => {
             println!("PASS: Canary config/key binding verified against independently trusted PCRs");
         }
-        TrustMode::SelfPinned => {
-            println!("PASS: Canary attestation and config/key binding are internally consistent");
-            println!(
-                "WARNING: --insecure allowed HTTP and self-pinned PCR0/1/2 from this attestation."
-            );
-            println!("WARNING: Workload identity is NOT verified; keys_out is suitable only for test/demo use.");
+        TrustMode::UnattestedDev => {
+            println!("PASS: public config and key documents are valid and agree on node identity");
+            println!("WARNING: --insecure skipped Canary attestation and allowed HTTP.");
+            println!("WARNING: Workload identity and config/key authenticity are NOT verified; keys_out is demo-only.");
         }
     }
-    println!("node_id: {}", inspected.metadata.node_id);
-    println!("config_digest: {}", inspected.metadata.config_digest);
-    println!("keyset_digest: {}", inspected.metadata.keyset_digest);
+    println!("node_id: {}", inspected.config.config.node_id);
+    println!("config_digest: {}", inspected.config.config_digest);
+    println!("keyset_digest: {}", digest(&inspected.keys_bytes));
     println!("keys_out: {}", keys_out.display());
     Ok(())
 }
 
 pub(crate) fn inspect(base_url: &str, pcrs_file: &Path) -> Result<InspectedNode> {
-    inspect_with_mode(base_url, &TrustMode::TrustedPcrs(pcrs_file))
-}
-
-fn inspect_with_mode(base_url: &str, mode: &TrustMode<'_>) -> Result<InspectedNode> {
-    let allow_http = matches!(mode, TrustMode::SelfPinned);
-    let base = parse_base_url(base_url, allow_http)?;
-    let agent = http_agent(allow_http);
-    let config_bytes = get(&agent, endpoint(&base, "config.json")?)?;
-    let keys_bytes = get(&agent, endpoint(&base, "keys.json")?)?;
-
-    let config: ConfigDocument =
-        serde_json::from_slice(&config_bytes).context("parsing strict /config.json")?;
-    let keys: KeysDocument =
-        serde_json::from_slice(&keys_bytes).context("parsing strict /keys.json")?;
+    let mut inspected = fetch_public_documents(base_url, false)?;
 
     let mut nonce = [0u8; 32];
     OsRng
         .try_fill_bytes(&mut nonce)
         .map_err(|err| anyhow::anyhow!("OS CSPRNG failed while generating nonce: {err}"))?;
-    let response_bytes = post_nonce(&agent, endpoint(&base, "attestation")?, &nonce)?;
+    let response_bytes = post_nonce(
+        &inspected.agent,
+        endpoint(&inspected.base, "attestation")?,
+        &nonce,
+    )?;
     let response: AttestationResponse =
         serde_json::from_slice(&response_bytes).context("parsing strict /attestation response")?;
     let document = STANDARD
@@ -144,7 +168,9 @@ fn inspect_with_mode(base_url: &str, mode: &TrustMode<'_>) -> Result<InspectedNo
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before UNIX epoch")?;
-    let expected = expected_pcrs(mode, &document)?;
+    let trusted = TrustedHashesFile::load(pcrs_file)?.into_expected_pcrs();
+    let expected = pcrs_from_hex(&trusted.pcr0, &trusted.pcr1, &trusted.pcr2)
+        .context("decoding trusted PCR0/1/2")?;
     let outcome = verify_evidence(&document, &expected, &nonce, now);
     if !outcome.passed {
         bail!(
@@ -155,12 +181,42 @@ fn inspect_with_mode(base_url: &str, mode: &TrustMode<'_>) -> Result<InspectedNo
     let user_data = outcome
         .user_data
         .context("verified Canary attestation is missing signed user_data")?;
-    let metadata = validate_verified_binding(&config, &keys, &keys_bytes, &user_data)?;
+    validate_verified_binding(
+        &inspected.config,
+        &inspected.keys,
+        &inspected.keys_bytes,
+        &user_data,
+    )?;
+    inspected.trust = NodeTrust::Attested;
+    Ok(inspected)
+}
+
+pub(crate) fn inspect_unattested(base_url: &str) -> Result<InspectedNode> {
+    let inspected = fetch_public_documents(base_url, true)?;
+    validate_public_documents(&inspected.config, &inspected.keys, &inspected.keys_bytes)?;
+    Ok(inspected)
+}
+
+fn fetch_public_documents(base_url: &str, allow_http: bool) -> Result<InspectedNode> {
+    fetch_public_documents_with(base_url, allow_http, get)
+}
+
+fn fetch_public_documents_with(
+    base_url: &str,
+    allow_http: bool,
+    mut fetch: impl FnMut(&ureq::Agent, Url) -> Result<Vec<u8>>,
+) -> Result<InspectedNode> {
+    let base = parse_base_url(base_url, allow_http)?;
+    let agent = http_agent(allow_http);
+    let config_bytes = fetch(&agent, endpoint(&base, "config.json")?)?;
+    let keys_bytes = fetch(&agent, endpoint(&base, "keys.json")?)?;
+    let config = serde_json::from_slice(&config_bytes).context("parsing strict /config.json")?;
+    let keys = serde_json::from_slice(&keys_bytes).context("parsing strict /keys.json")?;
     Ok(InspectedNode {
         config,
         keys,
-        metadata,
         keys_bytes,
+        trust: NodeTrust::UnattestedDev,
         agent,
         base,
     })
@@ -175,12 +231,7 @@ fn validate_verified_binding(
     keys_bytes: &[u8],
     signed_user_data: &[u8],
 ) -> Result<NodeMetadata> {
-    config.validate().context("validating /config.json")?;
-    validate_keys_document(keys).context("validating V0 /keys.json")?;
-    let canonical_keys = canonicalize(keys).context("canonicalizing /keys.json")?;
-    if canonical_keys != keys_bytes {
-        bail!("/keys.json is not exact RFC 8785 canonical bytes");
-    }
+    validate_public_documents(config, keys, keys_bytes)?;
     let metadata: NodeMetadata =
         serde_json::from_slice(signed_user_data).context("parsing strict signed node metadata")?;
     metadata
@@ -195,13 +246,30 @@ fn validate_verified_binding(
     if metadata.keyset_digest != digest(keys_bytes) {
         bail!("metadata keyset_digest does not match exact canonical /keys.json");
     }
-    if keys.protocol != canary_core::node::NODE_PROTOCOL
-        || keys.node_id != metadata.node_id
-        || keys.key_epoch != metadata.key_epoch
-    {
-        bail!("/keys.json protocol, node_id, or key_epoch does not match signed node metadata");
+    if keys.key_epoch != metadata.key_epoch {
+        bail!("/keys.json key_epoch does not match signed node metadata");
     }
     Ok(metadata)
+}
+
+fn validate_public_documents(
+    config: &ConfigDocument,
+    keys: &KeysDocument,
+    keys_bytes: &[u8],
+) -> Result<()> {
+    config.validate().context("validating /config.json")?;
+    validate_keys_document(keys).context("validating V0 /keys.json")?;
+    let canonical_keys = canonicalize(keys).context("canonicalizing /keys.json")?;
+    if canonical_keys != keys_bytes {
+        bail!("/keys.json is not exact RFC 8785 canonical bytes");
+    }
+    if keys.node_id != config.config.node_id {
+        bail!("/keys.json node_id does not match /config.json");
+    }
+    if keys.key_epoch != canary_core::keys::KEY_EPOCH {
+        bail!("/keys.json key_epoch is not supported by V0");
+    }
+    Ok(())
 }
 
 fn write_verified_keys(path: &Path, keys_bytes: &[u8]) -> Result<()> {
@@ -346,7 +414,7 @@ fn write_keys_no_clobber_with_suffixes(
 fn select_trust_mode(pcrs_file: Option<&Path>, insecure: bool) -> Result<TrustMode<'_>> {
     match (pcrs_file, insecure) {
         (Some(path), false) => Ok(TrustMode::TrustedPcrs(path)),
-        (None, true) => Ok(TrustMode::SelfPinned),
+        (None, true) => Ok(TrustMode::UnattestedDev),
         (Some(_), true) | (None, false) => {
             bail!("pass exactly one of --pcrs-file or --insecure")
         }
@@ -360,25 +428,6 @@ fn http_agent(allow_http: bool) -> ureq::Agent {
         .timeout_connect(Duration::from_secs(5))
         .timeout(HTTP_TIMEOUT)
         .build()
-}
-
-fn expected_pcrs(
-    mode: &TrustMode<'_>,
-    document: &[u8],
-) -> Result<std::collections::HashMap<u8, Vec<u8>>> {
-    match mode {
-        TrustMode::TrustedPcrs(path) => {
-            let trusted = TrustedHashesFile::load(path)?.into_expected_pcrs();
-            pcrs_from_hex(&trusted.pcr0, &trusted.pcr1, &trusted.pcr2)
-                .context("decoding trusted PCR0/1/2")
-        }
-        TrustMode::SelfPinned => {
-            let candidate = extract_candidate_pcrs(document)
-                .context("extracting PCR0/1/2 for --insecure self-pinning")?;
-            pcrs_from_hex(&candidate.pcr0, &candidate.pcr1, &candidate.pcr2)
-                .context("decoding PCR0/1/2 for --insecure self-pinning")
-        }
-    }
 }
 
 fn parse_base_url(value: &str, allow_http: bool) -> Result<Url> {
@@ -516,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn insecure_mode_alone_allows_http_and_self_pinning() {
+    fn insecure_mode_alone_allows_http_without_attestation() {
         let path = Path::new("trusted_hashes.json");
         assert!(matches!(
             select_trust_mode(Some(path), false).unwrap(),
@@ -524,12 +573,68 @@ mod tests {
         ));
         assert!(matches!(
             select_trust_mode(None, true).unwrap(),
-            TrustMode::SelfPinned
+            TrustMode::UnattestedDev
         ));
         assert!(select_trust_mode(Some(path), true).is_err());
         assert!(select_trust_mode(None, false).is_err());
         assert!(parse_base_url("http://example.com", true).is_ok());
         assert!(parse_base_url("http://example.com", false).is_err());
+    }
+
+    #[test]
+    fn insecure_inspection_fetches_only_public_documents() {
+        let (config, _, keys_bytes, _) = binding_fixture();
+        let config_bytes = serde_json::to_vec(&config).unwrap();
+        let mut paths = Vec::new();
+        let inspected = fetch_public_documents_with("http://localhost:1111", true, |_, url| {
+            paths.push(url.path().to_owned());
+            match url.path() {
+                "/config.json" => Ok(config_bytes.clone()),
+                "/keys.json" => Ok(keys_bytes.clone()),
+                path => panic!("unexpected dev-mode request: {path}"),
+            }
+        })
+        .unwrap();
+        validate_public_documents(&inspected.config, &inspected.keys, &inspected.keys_bytes)
+            .unwrap();
+
+        assert_eq!(paths, ["/config.json", "/keys.json"]);
+        assert_eq!(inspected.trust, NodeTrust::UnattestedDev);
+    }
+
+    #[test]
+    fn pinned_keys_must_be_canonical_and_exactly_match_live_keyset() {
+        let (config, keys, keys_bytes, _) = binding_fixture();
+        let inspected = InspectedNode {
+            config,
+            keys: keys.clone(),
+            keys_bytes: keys_bytes.clone(),
+            trust: NodeTrust::UnattestedDev,
+            agent: http_agent(true),
+            base: parse_base_url("http://localhost:1111", true).unwrap(),
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let pinned = directory.path().join("keys.json");
+        std::fs::write(&pinned, &keys_bytes).unwrap();
+        inspected.verify_pinned_keys(&pinned).unwrap();
+
+        std::fs::write(&pinned, serde_json::to_vec_pretty(&keys).unwrap()).unwrap();
+        assert!(inspected
+            .verify_pinned_keys(&pinned)
+            .unwrap_err()
+            .to_string()
+            .contains("not exact RFC 8785 canonical bytes"));
+
+        let other_seed = MasterSeed::from_base64(&STANDARD.encode([8u8; 32])).unwrap();
+        let other_keys = KeySet::derive(&other_seed, "node-a")
+            .unwrap()
+            .keys_document();
+        std::fs::write(&pinned, canonicalize(&other_keys).unwrap()).unwrap();
+        assert!(inspected
+            .verify_pinned_keys(&pinned)
+            .unwrap_err()
+            .to_string()
+            .contains("refuse key substitution"));
     }
 
     #[test]

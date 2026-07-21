@@ -5,6 +5,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use canary_core::{
+    canonical::digest,
     config::Target,
     evidence::{pcrs_from_hex, verify_evidence, EvidenceBundle},
     node::ConfigDocument,
@@ -12,19 +13,28 @@ use canary_core::{
     statement::{Statement, Status},
 };
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 
-use crate::inspect::{self, InspectedNode};
+use crate::inspect::{self, InspectedNode, NodeTrust};
 
 const SNAPSHOT_RETRIES: usize = 3;
 
 pub fn run(
     base_url: &str,
-    pcrs_file: &Path,
+    pcrs_file: Option<&Path>,
+    insecure: bool,
+    keys_path: &Path,
     requested_targets: &[String],
-    keys_out: Option<&Path>,
 ) -> Result<()> {
-    let node = inspect::inspect(base_url, pcrs_file)?;
-    print_node_report(&node);
+    let node = match (pcrs_file, insecure) {
+        (Some(path), false) => inspect::inspect(base_url, path)?,
+        (None, true) => inspect::inspect_unattested(base_url)?,
+        (Some(_), true) | (None, false) => {
+            bail!("pass exactly one of --pcrs-file or --insecure")
+        }
+    };
+    node.verify_pinned_keys(keys_path)?;
+    print_node_report(&node, keys_path);
     let targets = select_targets(&node.config, requested_targets)?;
     let mut authenticated_negative = false;
     let mut errors = Vec::new();
@@ -49,14 +59,143 @@ pub fn run(
         bail!("verification failed for target(s): {}", errors.join(", "));
     }
     if authenticated_negative {
-        println!("\nRESULT: AUTHENTICATED_NEGATIVE");
-        bail!("one or more targets reported a valid signed state other than VERIFIED");
+        match node.trust {
+            NodeTrust::Attested => println!("\nRESULT: AUTHENTICATED_NEGATIVE"),
+            NodeTrust::UnattestedDev => {
+                println!("\nRESULT: SIGNED_NEGATIVE (DEV MODE: CANARY IDENTITY NOT VERIFIED)")
+            }
+        }
+        bail!("one or more targets reported a structurally valid signed state other than VERIFIED");
     }
-    if let Some(path) = keys_out {
-        node.write_keys(path)?;
-        println!("\nKeys written: {}", path.display());
+    match node.trust {
+        NodeTrust::Attested => println!("\nRESULT: PASS"),
+        NodeTrust::UnattestedDev => {
+            println!("\nRESULT: PASS (DEV MODE: CANARY IDENTITY NOT VERIFIED)")
+        }
     }
-    println!("\nRESULT: PASS");
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoricalAttempt {
+    observation: HistoricalObservation,
+    statement: Statement,
+    evidence: Option<EvidenceBundle>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoricalObservation {
+    id: i64,
+    target_id: String,
+    attempted_at: DateTime<Utc>,
+    attempt_reason: String,
+    config_digest: String,
+}
+
+pub fn run_history(
+    base_url: &str,
+    pcrs_file: Option<&Path>,
+    insecure: bool,
+    keys_path: &Path,
+    target_id: &str,
+    attempt_id: i64,
+) -> Result<()> {
+    if attempt_id < 1 {
+        bail!("--attempt must be a positive history ID");
+    }
+    let node = match (pcrs_file, insecure) {
+        (Some(path), false) => inspect::inspect(base_url, path)?,
+        (None, true) => inspect::inspect_unattested(base_url)?,
+        (Some(_), true) | (None, false) => {
+            bail!("pass exactly one of --pcrs-file or --insecure")
+        }
+    };
+    node.verify_pinned_keys(keys_path)?;
+    print_node_report(&node, keys_path);
+    let target = node
+        .config
+        .config
+        .targets
+        .iter()
+        .find(|target| target.id == target_id)
+        .with_context(|| format!("verified Canary config has no target {target_id:?}"))?;
+    let attempt_segment = attempt_id.to_string();
+    let historical: HistoricalAttempt = node
+        .get_json(&["targets", target_id, "history", attempt_segment.as_str()])
+        .with_context(|| format!("fetching historical attempt {attempt_id} for {target_id}"))?;
+
+    if historical.observation.id != attempt_id
+        || historical.observation.target_id != target_id
+        || historical.statement.payload.target_id != target_id
+    {
+        bail!("historical response does not match the requested target and attempt");
+    }
+    if historical.observation.config_digest != historical.statement.payload.config_digest {
+        bail!("historical summary config_digest does not match the signed statement");
+    }
+    let issued_at: DateTime<Utc> = historical
+        .statement
+        .payload
+        .issued_at
+        .parse()
+        .context("parsing historical statement issued_at")?;
+    verify_statement_binding(
+        &node.config,
+        &node.keys,
+        target,
+        &historical.statement,
+        issued_at,
+    )?;
+    let report = match historical.evidence.as_ref() {
+        Some(evidence) => verify_target_artifacts(
+            &node.config,
+            &node.keys,
+            target,
+            &historical.statement,
+            Some(evidence),
+            issued_at,
+        )?,
+        None => TargetReport {
+            status: historical.statement.payload.status,
+            reason: historical.statement.payload.reason.clone(),
+            evidence_replayed: false,
+        },
+    };
+
+    println!("\nHISTORICAL ATTEMPT {attempt_id}");
+    println!("  Target                  {target_id}");
+    println!(
+        "  Attempted at            {}",
+        historical.observation.attempted_at
+    );
+    println!(
+        "  Probe result            {}",
+        historical.observation.attempt_reason
+    );
+    println!("  Statement signatures    PASS");
+    println!("  Statement validity      PASS AT SIGNED ISSUANCE TIME");
+    println!("  Config binding          PASS");
+    if report.evidence_replayed {
+        println!("  Statement/evidence link PASS");
+        println!("  Evidence replay         REPRODUCED {}", report.reason);
+    } else {
+        println!("  Evidence replay         NOT AVAILABLE FOR THIS ATTEMPT");
+    }
+    println!("  Signed status           {}", status_text(report.status));
+    println!("  Signed reason           {}", report.reason);
+    println!("  History metadata        UNSIGNED / DIAGNOSTIC");
+    match (node.trust, report.evidence_replayed) {
+        (NodeTrust::Attested, true) => println!("\nRESULT: HISTORICAL CLAIM REPRODUCED"),
+        (NodeTrust::Attested, false) => {
+            println!("\nRESULT: HISTORICAL STATEMENT VERIFIED; ATTEMPT EVIDENCE NOT AVAILABLE")
+        }
+        (NodeTrust::UnattestedDev, true) => println!(
+            "\nRESULT: HISTORICAL CLAIM REPRODUCED (DEV MODE: CANARY IDENTITY NOT VERIFIED)"
+        ),
+        (NodeTrust::UnattestedDev, false) => println!(
+            "\nRESULT: HISTORICAL STATEMENT VERIFIED; ATTEMPT EVIDENCE NOT AVAILABLE (DEV MODE: CANARY IDENTITY NOT VERIFIED)"
+        ),
+    }
     Ok(())
 }
 
@@ -268,15 +407,29 @@ fn verify_statement_binding(
     Ok(())
 }
 
-fn print_node_report(node: &InspectedNode) {
+fn print_node_report(node: &InspectedNode, keys_path: &Path) {
     println!("CANARY NODE");
-    println!("  Nitro attestation       PASS");
-    println!("  Canary PCR identity     PASS");
-    println!("  Transport policy        HTTPS ONLY");
-    println!("  Config binding          PASS");
-    println!("  Signing-key binding     PASS");
-    println!("  Node ID                 {}", node.metadata.node_id);
-    println!("  Config digest           {}", node.metadata.config_digest);
+    match node.trust {
+        NodeTrust::Attested => {
+            println!("  Nitro attestation       PASS");
+            println!("  Canary PCR identity     PASS");
+            println!("  Transport policy        HTTPS ONLY");
+            println!("  Config binding          PASS");
+            println!("  Attested key binding    PASS");
+        }
+        NodeTrust::UnattestedDev => {
+            println!("  Nitro attestation       SKIPPED / DEV MODE");
+            println!("  Canary PCR identity     NOT VERIFIED");
+            println!("  Transport policy        HTTP ALLOWED");
+            println!("  Config digest           INTERNALLY CONSISTENT");
+            println!("  Live signing keys       UNATTESTED");
+        }
+    }
+    println!("  Pinned key continuity   PASS");
+    println!("  Pinned keys             {}", keys_path.display());
+    println!("  Node ID                 {}", node.config.config.node_id);
+    println!("  Config digest           {}", node.config.config_digest);
+    println!("  Keyset digest           {}", digest(&node.keys_bytes));
 }
 
 fn print_target_report(target: &Target, report: &TargetReport) {

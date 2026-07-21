@@ -311,11 +311,21 @@ steps 2 and 3 and atomically saves the exact key document whose digest it verifi
 Its normal mode requires `--pcrs-file`, performs independent measurement
 verification, and accepts only an HTTPS Canary origin.
 
-For out-of-Caution test/demo deployments only, `inspect-node --insecure` may accept an
-HTTP origin and self-pin PCR0/1/2 from the fresh signed attestation. It must retain AWS
-chain, COSE signature, certificate-time, nonce, and config/key binding verification,
-and must warn that workload identity is not established and exported keys are
-demo-only. `verify` and `verify-evidence` provide no insecure mode.
+`canaryctl verify` and `verify-history` must require that separately enrolled key
+document through `--keys`. After verifying the live node as described above, they
+must require the live canonical `/keys.json` bytes to equal the pinned file before
+using the keys for either signature. This makes key continuity and rotation explicit;
+`inspect-node` is the only enrollment operation and never overwrites an existing pin.
+
+For out-of-Caution test/demo deployments only, `inspect-node --insecure` and
+`verify --insecure` may accept an HTTP origin and must skip Canary attestation
+entirely. They validate the served config digest, canonical key document, shared node
+identity and must warn that Canary workload identity is not established.
+`inspect-node --insecure` saves an explicit TOFU key pin; `verify --insecure` and
+`verify-history --insecure` require exact equality with that operator-provided
+`--keys` pin before validating target statements and evidence. Initial key enrollment
+remains TOFU.
+`verify-evidence` provides no insecure mode.
 
 ## 8. Signing and key management
 
@@ -547,12 +557,21 @@ assumes target names, URLs, PCRs, public keys and attestation evidence are publi
 | `GET /targets/{id}/statement` | `canaryd` | Latest hybrid-signed statement |
 | `GET /targets/{id}/evidence` | `canaryd` | Latest raw Bootproof evidence bundle and digest |
 | `GET /targets/{id}/history` | `canaryd` | Bounded current-lifetime observation history |
+| `GET /targets/{id}/history/{attempt_id}` | `canaryd` | Exact retained statement and evidence for one attempt |
 | `GET /config.json` | `canaryd` | `{ "config": <canonical config>, "config_digest": "sha256:..." }` |
 | `GET /keys.json` | `canaryd` | Canonical hybrid public key set |
 | `POST /attestation` | Caution Bootproofd | Fresh attestation for the Canary enclave itself |
 
 There are no create/update/delete, manual-probe, authentication, webhook or admin
 routes in V0.
+
+History-list fields are unsigned diagnostics. The detail route returns the exact
+signed post-attempt statement and, when the response contained decodable attestation
+document bytes, the exact nonce-bound evidence bundle stored for that attempt. A
+consumer can authenticate and replay those artifacts; transport failures and
+undecodable responses necessarily have no target evidence to replay. Historical
+statement freshness is evaluated at its signed issuance time and must not be
+presented as current freshness.
 
 ## 14. StageX build and Caution deployment
 
@@ -663,20 +682,24 @@ git push caution main
 caution verify --save-pcrs
 caution secret send-shard --keyring canary.private.asc
 
-# 6. Verify the Canary node and every current target claim end to end.
-canaryctl verify \
-  --url https://<canary-host> \
-  --pcrs-file .caution/trusted_hashes.json
-
-# Lower-level/offline equivalents remain available.
+# 6. Attest the Canary once and enroll its exact public signing keys.
 canaryctl inspect-node \
   --url https://<canary-host> \
   --pcrs-file .caution/trusted_hashes.json \
-  --keys-out trusted-keys.json
+  --keys-out canary-keys.json
+
+# 7. Re-attest the Canary and verify every current target claim end to end,
+# requiring the independently enrolled keyset as well as the Canary PCRs.
+canaryctl verify \
+  --url https://<canary-host> \
+  --pcrs-file .caution/trusted_hashes.json \
+  --keys canary-keys.json
+
+# Lower-level/offline equivalents remain available.
 curl -fsS https://<canary-host>/targets/payments-prod/statement -o statement.json
 canaryctl verify-statement \
   --statement statement.json \
-  --keys trusted-keys.json
+  --keys canary-keys.json
 ```
 
 Never commit `.env` or the unencrypted private keyring. Committing

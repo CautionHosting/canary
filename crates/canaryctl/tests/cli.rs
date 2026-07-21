@@ -321,7 +321,7 @@ fn inspect_node_rejects_non_https_origin_without_writing_keys() {
 }
 
 #[test]
-fn strict_verification_commands_require_pcrs_file() {
+fn verification_commands_require_an_explicit_trust_mode() {
     let dir = TempDir::new("trust-mode");
     let keys = dir.join("keys.json");
     let evidence = dir.join("evidence.json");
@@ -347,5 +347,21 @@ fn strict_verification_commands_require_pcrs_file() {
     assert!(!live.status.success());
     let live_error = String::from_utf8_lossy(&live.stderr);
     assert!(live_error.contains("--pcrs-file"));
-    assert!(!live_error.contains("--insecure"));
+    assert!(live_error.contains("--insecure"));
+    assert!(live_error.contains("--keys"));
+
+    let history = run(&[
+        "verify-history",
+        "--url",
+        "https://canary.example.com",
+        "--target",
+        "payments-prod",
+        "--attempt",
+        "1",
+    ]);
+    assert!(!history.status.success());
+    let history_error = String::from_utf8_lossy(&history.stderr);
+    assert!(history_error.contains("--pcrs-file"));
+    assert!(history_error.contains("--insecure"));
+    assert!(history_error.contains("--keys"));
 }

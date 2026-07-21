@@ -13,7 +13,7 @@ use sqlx::{
     Row, SqlitePool,
 };
 
-use crate::model::{AttemptWrite, CurrentWrite, HistoryEntry, TargetSnapshot};
+use crate::model::{AttemptWrite, CurrentWrite, HistoricalAttempt, HistoryEntry, TargetSnapshot};
 
 /// Default retained attempts per target. Runtime config may select a different
 /// validated limit for a specific measured deployment.
@@ -334,6 +334,28 @@ impl Store {
         rows.into_iter().map(history_row).collect()
     }
 
+    /// Return the exact signed statement and evidence retained for one
+    /// completed attempt. The summary remains unsigned diagnostic metadata;
+    /// consumers must verify the returned artifacts themselves.
+    pub async fn historical_attempt(
+        &self,
+        target_id: &str,
+        attempt_id: i64,
+    ) -> Result<Option<HistoricalAttempt>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, target_id, attempted_at, observed_at, state, reason, attempt_reason, latency_ms,
+                    evidence_digest, manifest_digest, config_digest, transport_warning,
+                    statement_json, evidence_json
+             FROM attempts WHERE target_id = ? AND id = ?",
+        )
+        .bind(target_id)
+        .bind(attempt_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(historical_attempt_row).transpose()
+    }
+
     #[cfg(test)]
     async fn count_rows(&self, table: &str, target_id: &str) -> Result<i64, StoreError> {
         let query = match table {
@@ -510,6 +532,29 @@ fn history_row(row: sqlx::sqlite::SqliteRow) -> Result<HistoryEntry, StoreError>
         manifest_digest: row.try_get("manifest_digest")?,
         config_digest: row.try_get("config_digest")?,
         transport_warning: row.try_get("transport_warning")?,
+    })
+}
+
+fn historical_attempt_row(row: sqlx::sqlite::SqliteRow) -> Result<HistoricalAttempt, StoreError> {
+    let statement_json: String = row.try_get("statement_json")?;
+    let evidence_json: Option<String> = row.try_get("evidence_json")?;
+    let statement =
+        serde_json::from_str(&statement_json).map_err(|source| StoreError::Deserialize {
+            field: "historical statement",
+            source,
+        })?;
+    let evidence = evidence_json
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|source| StoreError::Deserialize {
+                field: "historical evidence",
+                source,
+            })
+        })
+        .transpose()?;
+    Ok(HistoricalAttempt {
+        observation: history_row(row)?,
+        statement,
+        evidence,
     })
 }
 
@@ -797,7 +842,7 @@ mod tests {
     async fn successful_attempt_persists_current_signed_and_evidence_material() {
         let (_dir, store) = store().await;
         let write = attempt("one", 7, true);
-        store.commit(write.clone()).await.unwrap();
+        let receipt = store.commit(write.clone()).await.unwrap();
 
         let (attempted_at, observed_at, state, reason, statement_json, evidence_json) =
             store.persisted_material("one").await.unwrap();
@@ -813,6 +858,20 @@ mod tests {
             serde_json::from_str::<EvidenceBundle>(&evidence_json.unwrap()).unwrap(),
             write.target.evidence.clone().unwrap()
         );
+
+        let historical = store
+            .historical_attempt("one", receipt.attempt_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(historical.observation.id, receipt.attempt_id);
+        assert_eq!(historical.statement, write.target.statement.clone());
+        assert_eq!(historical.evidence, write.attempt_evidence.clone());
+        assert!(store
+            .historical_attempt("one", 999)
+            .await
+            .unwrap()
+            .is_none());
         let current = sqlx::query(
             "SELECT state, reason, statement_json, evidence_json
              FROM current_targets WHERE target_id = ?",

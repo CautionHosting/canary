@@ -19,10 +19,17 @@
 
   function verificationCommand(targetId) {
     const target = targetId ? ` \\\n  --target ${targetId}` : "";
-    const origin = window.location.protocol === "https:"
-      ? window.location.origin
-      : "https://<deployed-canary-origin>";
-    return `canaryctl verify \\\n  --url ${origin} \\\n  --pcrs-file .caution/trusted_hashes.json${target}`;
+    if (window.location.protocol !== "https:") {
+      return `canaryctl verify \\\n  --url ${window.location.origin} \\\n  --insecure \\\n  --keys canary-keys.json${target}`;
+    }
+    return `canaryctl verify \\\n  --url ${window.location.origin} \\\n  --pcrs-file .caution/trusted_hashes.json \\\n  --keys canary-keys.json${target}`;
+  }
+
+  function historyVerificationCommand(targetId, attemptId) {
+    const trust = window.location.protocol === "https:"
+      ? "--pcrs-file .caution/trusted_hashes.json"
+      : "--insecure";
+    return `canaryctl verify-history \\\n  --url ${window.location.origin} \\\n  ${trust} \\\n  --keys canary-keys.json \\\n  --target ${targetId} \\\n  --attempt ${attemptId}`;
   }
 
   function setCommand(element, targetId) {
@@ -100,7 +107,7 @@
     const table = document.createElement("table");
     const head = document.createElement("thead");
     const headerRow = document.createElement("tr");
-    for (const label of ["Attempted", "State", "Probe result", "Latency", "Evidence digest"]) {
+    for (const label of ["Attempted", "State", "Probe result", "Latency", "Evidence digest", "Replay"]) {
       const th = document.createElement("th");
       th.scope = "col";
       th.textContent = label;
@@ -117,6 +124,19 @@
       appendCell(row, observation.attempt_reason);
       appendCell(row, observation.latency_ms == null ? "—" : `${observation.latency_ms} ms`);
       appendCell(row, observation.evidence_digest, "digest-cell");
+      const actions = document.createElement("td");
+      actions.className = "history-actions";
+      const raw = document.createElement("a");
+      raw.className = "raw-link";
+      raw.href = `${targetPath("history")}/${observation.id}`;
+      raw.textContent = "Artifacts";
+      const copy = document.createElement("button");
+      copy.className = "copy-button";
+      copy.type = "button";
+      copy.dataset.copyText = historyVerificationCommand(currentTarget.id, observation.id);
+      copy.textContent = "Copy CLI";
+      actions.append(raw, copy);
+      row.append(actions);
       body.append(row);
     }
     table.append(body);
@@ -185,8 +205,8 @@
   async function copyText(button) {
     const selector = button.dataset.copy;
     const source = selector ? document.querySelector(selector) : null;
-    if (!source) return;
-    const text = source.textContent;
+    const text = button.dataset.copyText || source?.textContent;
+    if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
     } catch {
@@ -218,7 +238,7 @@
       return;
     }
 
-    const copyButton = event.target.closest("[data-copy]");
+    const copyButton = event.target.closest("[data-copy], [data-copy-text]");
     if (copyButton) copyText(copyButton);
   });
 
@@ -247,7 +267,7 @@
   setCommand(document.querySelector("#all-targets-command"), null);
   if (window.location.protocol !== "https:") {
     const note = document.querySelector("#command-trust-note");
-    if (note) note.textContent = "This HTTP page is a local UI preview only. Verify the deployed HTTPS origin with independently reproduced Canary PCRs.";
+    if (note) note.textContent = "Demo mode skips Canary attestation and requires a previously TOFU-enrolled canary-keys.json pin. It still does not establish Canary workload identity or the authenticity of the initial enrollment.";
   }
 
   let hashTarget = "";

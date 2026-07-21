@@ -119,3 +119,15 @@ pub struct HistoryEntry {
     pub config_digest: String,
     pub transport_warning: Option<String>,
 }
+
+/// Exact artifacts retained for one completed probe attempt.
+///
+/// `observation` is unsigned diagnostic metadata. `statement` is the signed
+/// post-attempt Canary claim, while `evidence` is the exact nonce-bound target
+/// attestation bundle received by that attempt when one could be decoded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoricalAttempt {
+    pub observation: HistoryEntry,
+    pub statement: Statement,
+    pub evidence: Option<EvidenceBundle>,
+}

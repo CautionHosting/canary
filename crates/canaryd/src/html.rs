@@ -30,7 +30,7 @@ const PAGE_HEAD: &str = r#"<!doctype html>
   --accent-soft: rgba(99, 220, 255, .09);
   --danger: #ff8193;
   --warning: #e8c872;
-  --success: #63dcff;
+  --success: #5cff9d;
 }
 
 * { box-sizing: border-box; }
@@ -125,7 +125,7 @@ h1 { margin: 0; color: #f2f8fa; font-size: clamp(34px, 5vw, 54px); font-weight: 
 .target-id { display: block; margin-bottom: 4px; color: var(--muted); font-size: 11px; }
 .target-header h3 { margin: 0; color: #f0f6f8; font-size: 18px; font-weight: 550; line-height: 1.25; }
 .header-actions { display: flex; align-items: center; gap: 10px; }
-.status-badge { --status-color: var(--muted); flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; padding: 5px 8px; color: var(--status-color); background: color-mix(in srgb, var(--status-color) 9%, transparent); border: 1px solid color-mix(in srgb, var(--status-color) 30%, transparent); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
+.status-badge { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; padding: 5px 8px; color: var(--status-color, var(--muted)); background: color-mix(in srgb, var(--status-color, var(--muted)) 12%, transparent); border: 1px solid color-mix(in srgb, var(--status-color, var(--muted)) 42%, transparent); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
 .status-badge::before { content: ""; width: 6px; height: 6px; background: currentColor; border-radius: 50%; box-shadow: 0 0 9px currentColor; }
 .open-target { padding: 6px 8px; color: var(--accent); border: 1px solid rgba(99, 220, 255, .25); font-size: 11px; }
 .open-target:hover { color: var(--accent-bright); background: var(--accent-soft); }
@@ -166,9 +166,11 @@ dialog::backdrop { background: rgba(1, 5, 8, .82); backdrop-filter: blur(5px); }
 .artifact-output th { position: sticky; top: 0; color: var(--muted); background: #070b0e; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
 .digest-cell { max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
 .history-status { font-weight: 700; }
-.history-status-verified { color: var(--accent); }
+.history-status-verified { color: var(--success); }
 .history-status-failed { color: var(--danger); }
 .history-status-pending { color: var(--warning); }
+.history-actions { display: flex; align-items: center; gap: 8px; }
+.history-actions .copy-button { padding: 5px 7px; white-space: nowrap; }
 .target-command-box { margin: 26px 0 0 184px; }
 .target-command-box h3 { margin: 0 0 10px; color: #eef5f7; font-size: 13px; font-weight: 600; }
 
@@ -244,7 +246,7 @@ const INSPECTOR: &str = r##"</div></section></main>
       <pre class="artifact-output" data-artifact-output data-state="idle">Select this view to load its current JSON.</pre>
     </section>
     <section class="panel" data-panel="history" role="tabpanel" hidden>
-      <div class="panel-intro"><h3>Process-lifetime diagnostics</h3><p>History records completed probe attempts, newest first. It helps explain transitions and transport failures, but it is <strong>unsigned diagnostic data—not an audit log or cryptographic proof</strong>. Use the current signed statement and linked evidence for verification.</p></div>
+      <div class="panel-intro"><h3>Recorded attempts and replay</h3><p>History summaries are <strong>unsigned diagnostic data</strong>, but each decodable attempt retains its exact signed statement and nonce-bound evidence. Open an attempt’s artifacts or copy its <code>canaryctl verify-history</code> command to reproduce the cryptographic result locally. Transport and undecodable-response failures have no target evidence to replay.</p></div>
       <div class="panel-links"><a class="raw-link" id="history-json-link" href="#">Open raw history JSON</a></div>
       <div class="artifact-output" data-artifact-output data-state="idle">Select this view to load its current JSON.</div>
     </section>
@@ -262,7 +264,7 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
     page.push_str("</div></div><div class=\"meta-item meta-item--wide\"><span class=\"label\">Config digest</span><div class=\"value\">");
     push_escaped(&mut page, &snapshot.config_digest);
     page.push_str("</div></div></div><div class=\"trust-note\" role=\"note\"><strong>How to read this page</strong><p>The badges are results produced by Canary’s server-side verifier. For independent trust, verify the Canary node, signed statement, and linked evidence locally with <code>canaryctl</code>.</p></div></header>");
-    page.push_str("<section class=\"verify-box\" aria-labelledby=\"verify-heading\"><div class=\"verify-box-head\"><h2 id=\"verify-heading\">Verify independently</h2></div><p>Run the complete verification chain locally: fresh Canary attestation, measured config and signing keys, hybrid statement signatures, then the target’s linked Nitro evidence and PCR policy.</p><div class=\"command-row\"><pre id=\"all-targets-command\">canaryctl verify --url &lt;this-origin&gt; --pcrs-file .caution/trusted_hashes.json</pre><button class=\"copy-button\" type=\"button\" data-copy=\"#all-targets-command\">Copy</button></div><p class=\"command-note\" id=\"command-trust-note\">The PCR file must contain independently reproduced PCR0/1/2 for this Canary node.</p></section>");
+    page.push_str("<section class=\"verify-box\" aria-labelledby=\"verify-heading\"><div class=\"verify-box-head\"><h2 id=\"verify-heading\">Verify independently</h2></div><p>Run the complete verification chain locally: fresh Canary attestation, measured config, operator-pinned signing keys, both statement signatures, then the target’s linked Nitro evidence and PCR policy.</p><div class=\"command-row\"><pre id=\"all-targets-command\">canaryctl verify --url &lt;this-origin&gt; --pcrs-file .caution/trusted_hashes.json --keys canary-keys.json</pre><button class=\"copy-button\" type=\"button\" data-copy=\"#all-targets-command\">Copy</button></div><p class=\"command-note\" id=\"command-trust-note\">First enroll canary-keys.json with inspect-node. The PCR file must contain independently reproduced PCR0/1/2 for this Canary node.</p></section>");
     page.push_str("<section class=\"artifact-guide\" aria-label=\"Artifact guide\"><article class=\"guide-item\"><span class=\"guide-number\">01 / Claim</span><h2>Statement</h2><p>Canary’s short-lived, hybrid-signed conclusion. It binds the target, policy config, result, evidence digest, and time.</p></article><article class=\"guide-item\"><span class=\"guide-number\">02 / Proof</span><h2>Evidence</h2><p>The raw nonce-bound Nitro material Canary evaluated. It proves nothing about Canary’s conclusion until linked and checked.</p></article><article class=\"guide-item\"><span class=\"guide-number\">03 / Diagnostics</span><h2>History</h2><p>Unsigned process-lifetime observations for understanding changes. Useful context, not durable cryptographic proof.</p></article></section>");
     page.push_str("<section aria-labelledby=\"targets-heading\"><div class=\"section-heading\"><h2 id=\"targets-heading\">Monitored targets</h2><span class=\"target-count\">");
     page.push_str(&snapshot.targets.len().to_string());

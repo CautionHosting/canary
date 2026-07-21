@@ -30,9 +30,10 @@ The dashboard is the guided entry point. Select **Inspect** on any target to see
 - The current target state and what the badge does—and does not—prove.
 - The hybrid-signed **statement**, which records Canary's conclusion.
 - The linked **evidence**, which is the raw nonce-bound Nitro proof Canary evaluated.
-- Process-lifetime **history**, which is useful unsigned diagnostic context rather
-  than cryptographic proof.
-- A ready-to-copy `canaryctl verify` command for independent local verification.
+- Process-lifetime **history** summaries plus the exact retained artifacts for each
+  decodable attempt.
+- Ready-to-copy `canaryctl verify` and `verify-history` commands for independent
+  local verification.
 
 The original JSON endpoints remain linked throughout the UI. The page itself does not
 perform browser-side cryptographic verification; use the displayed `canaryctl` command
@@ -247,54 +248,84 @@ enclave.
 
 ## Verify a deployed Canary
 
-The normal operator command verifies the Canary node and every configured target end
-to end:
+### Caution deployment: measured enrollment, then verification
+
+First independently reproduce and save the expected PCR0/1/2 for the **Canary
+deployment itself**:
 
 ```sh
-canaryctl verify \
-  --url https://canary.example.com \
-  --pcrs-file .caution/trusted_hashes.json
+caution verify --save-pcrs
 ```
 
-Add `--target payments-prod` to select one target; repeat it to select several.
-`--keys-out trusted-keys.json` optionally saves the exact attestation-bound key
-document, but the combined command otherwise keeps it in memory.
-
-For the Canary node, `--pcrs-file` supplies the independently reproduced PCR0/1/2
-expected from its fresh Nitro attestation. The CLI verifies the AWS chain, COSE
-signature, certificate time, nonce and exact PCR values before trusting the attested
-config and key digests. It then verifies each target statement and its linked evidence
-against the target PCR policy in that attested config.
-
-These two commands cover different links in the trust chain: `caution verify
---save-pcrs` establishes the expected PCR identity of the deployed Canary image;
-`canaryctl verify` consumes that trusted file and verifies the live Canary
-attestation, attested config and keys, signed target statements, and linked target
-evidence. Both are required for end-to-end verification.
-
-The lower-level command verifies fresh Canary attestation and saves its public signing
-keys:
+Then enroll the Canary signing keyset. This performs a fresh nonce-bound Canary
+attestation, checks it against those PCRs, checks the attested config and keyset
+digests, and atomically saves the exact canonical public-key document:
 
 ```sh
 canaryctl inspect-node \
   --url https://canary.example.com \
   --pcrs-file .caution/trusted_hashes.json \
-  --keys-out trusted-keys.json
+  --keys-out canary-keys.json
 ```
 
-For an out-of-Caution test/demo deployment only, `inspect-node --insecure` permits an
-HTTP origin and self-pins PCR0/1/2 from the fresh attestation:
+Keep `canary-keys.json` as an integrity-critical public trust artifact. Enrollment
+refuses to overwrite it. An intentional seed/key rotation requires a separately
+reviewed re-enrollment to a new file.
+
+Every subsequent live verification requires both explicit trust inputs:
+
+```sh
+canaryctl verify \
+  --url https://canary.example.com \
+  --pcrs-file .caution/trusted_hashes.json \
+  --keys canary-keys.json
+```
+
+Add `--target payments-prod` to select one target; repeat it to select several. With no
+selection, every target in the attested config is verified.
+
+`verify` performs the following checks in order:
+
+1. Fresh Canary AWS/Nitro chain, COSE signature, certificate time, nonce and exact
+   Canary PCR0/1/2.
+2. Attested `config_digest`, `keyset_digest`, node ID and key epoch against the live
+   canonical documents.
+3. Exact live keyset equality with the operator-enrolled `--keys` file.
+4. Both Ed25519 and ML-DSA-65 signatures on each current Canary statement, plus
+   statement freshness, target origin, node identity and config-digest binding.
+5. Exact statement-to-evidence digest and observation-time binding, followed by local
+   replay of the target Nitro chain, signature, nonce and target PCR0/1/2 policy.
+
+Canary signs the **statement**, not the evidence bytes directly. The statement contains
+the evidence digest and observation time, which prevents substituting another evidence
+bundle. Any missing signature, stale statement, key/config mismatch, evidence mismatch,
+negative target result or unverifiable target exits non-zero.
+
+### Non-Caution development: explicit TOFU key continuity
+
+There is no Canary attestation outside Caution. Enroll the initially observed keyset
+once, explicitly as TOFU:
 
 ```sh
 canaryctl inspect-node \
   --url http://localhost:1111 \
   --insecure \
-  --keys-out demo-keys.json
+  --keys-out demo-canary-keys.json
 ```
 
-It still verifies the AWS certificate chain, COSE signature, certificate time, fresh
-nonce, and config/key binding. It does **not** establish the Canary workload identity;
-the exported keys are suitable only for the test/demo flow.
+Then require that pin on every verification:
+
+```sh
+canaryctl verify \
+  --url http://localhost:1111 \
+  --insecure \
+  --keys demo-canary-keys.json
+```
+
+This still verifies both statement signatures and the complete target evidence/PCR
+chain. It proves continuity with the signer enrolled by the first command. It does
+**not** prove that the initial signer, served config, or running Canary workload was
+authentic; an attacker present during TOFU enrollment can establish their own key.
 
 Then the offline commands can verify a downloaded target statement and evidence:
 
@@ -304,16 +335,37 @@ curl -fsS https://canary.example.com/targets/payments-prod/evidence -o evidence.
 
 canaryctl verify-statement \
   --statement statement.json \
-  --keys trusted-keys.json
+  --keys canary-keys.json
 
 canaryctl verify-evidence \
   --evidence evidence.json \
   --pcrs-file .caution/trusted_hashes/payments-prod.json
 ```
 
-`verify` and `verify-evidence` always require independently trusted PCR files.
-`inspect-node` requires exactly one of `--pcrs-file` or the explicit demo-only
-`--insecure` mode; there is no implicit trust downgrade.
+`verify-evidence` always requires independently trusted target PCRs. `verify` and
+`verify-history` additionally require the enrolled Canary `--keys` file. Live commands
+require exactly one of `--pcrs-file` or explicit demo-only `--insecure`; there is no
+implicit trust downgrade.
+
+To investigate a past probe, take its numeric ID from the history endpoint (or
+the UI's History tab) and replay the exact retained statement and evidence:
+
+```sh
+canaryctl verify-history \
+  --url https://canary.example.com \
+  --pcrs-file .caution/trusted_hashes.json \
+  --keys canary-keys.json \
+  --target payments-prod \
+  --attempt 42
+```
+
+This verifies the historical statement as of its signed issuance time, checks it
+against the currently attested Canary config and keys, and reruns the retained
+nonce-bound target evidence at its recorded observation time. A reproduced negative
+result such as `INVALID_SIGNATURE` is a successful forensic replay, not a healthy
+target result. The attempt timestamp and other history summary fields remain unsigned.
+Transport failures and responses without a decodable attestation document have no
+target evidence to replay.
 
 ## HTTP API
 
@@ -325,6 +377,7 @@ canaryctl verify-evidence \
 | `GET /targets/{id}/statement` | Latest hybrid-signed statement |
 | `GET /targets/{id}/evidence` | Latest Bootproof evidence bundle |
 | `GET /targets/{id}/history` | Up to configured `history_limit` observations; default 1,000 |
+| `GET /targets/{id}/history/{attempt_id}` | Exact retained statement and evidence for local replay |
 | `GET /config.json` | Measured target configuration and digest |
 | `GET /keys.json` | Ed25519 and ML-DSA-65 public keys |
 
@@ -350,8 +403,9 @@ curl -fsS https://canary.example.com/keys.json
   responses are not independently signed.
 - `/targets/{id}/statement` carries `payload.config_digest`; the entire payload is
   signed with both Ed25519 and ML-DSA-65.
-- History rows carry the digest for correlation, but history is diagnostic and
-  unsigned.
+- History rows carry the digest for correlation but remain unsigned. A history-detail
+  response also returns the exact signed statement and retained evidence, which must
+  be verified with `canaryctl verify-history` before it is trusted.
 - Evidence does not duplicate `config_digest`. Its digest and observation time are
   bound by the signed statement, which is in turn bound to the config digest.
 - `/keys.json` has no config digest. Its exact keyset digest and the config digest are

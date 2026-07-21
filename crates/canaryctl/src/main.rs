@@ -88,7 +88,7 @@ enum Command {
         #[arg(long)]
         pcrs_file: PathBuf,
     },
-    /// Verify fresh Canary node metadata against config and public keys (spec §7.3).
+    /// Inspect Canary config and keys, normally bound by fresh node attestation.
     InspectNode {
         /// Canary origin. HTTPS is required unless --insecure is set.
         #[arg(long)]
@@ -100,31 +100,71 @@ enum Command {
             conflicts_with = "insecure"
         )]
         pcrs_file: Option<PathBuf>,
-        /// Demo only: allow HTTP and self-pin PCRs from the live attestation.
+        /// Demo only: allow HTTP and skip Canary attestation entirely.
         #[arg(
             long,
             required_unless_present = "pcrs_file",
             conflicts_with = "pcrs_file"
         )]
         insecure: bool,
-        /// Output path for the exact canonical keys document after verification.
+        /// Output path for the exact keys document; demo-mode output is untrusted.
         #[arg(long)]
         keys_out: PathBuf,
     },
-    /// Verify a live Canary node and all selected target claims end to end.
+    /// Verify a live Canary and all selected target claims end to end.
     Verify {
-        /// Canary HTTPS origin, for example https://canary.example.com.
+        /// Canary origin. HTTPS is required unless --insecure is set.
         #[arg(long)]
         url: String,
         /// Independently verified Canary PCR0/1/2 file.
+        #[arg(
+            long,
+            required_unless_present = "insecure",
+            conflicts_with = "insecure"
+        )]
+        pcrs_file: Option<PathBuf>,
+        /// Demo only: allow HTTP and skip Canary attestation entirely.
+        #[arg(
+            long,
+            required_unless_present = "pcrs_file",
+            conflicts_with = "pcrs_file"
+        )]
+        insecure: bool,
+        /// Operator-enrolled canonical keyset produced by inspect-node --keys-out.
         #[arg(long)]
-        pcrs_file: PathBuf,
+        keys: PathBuf,
         /// Verify only this target ID. Repeat to select multiple targets; defaults to all.
         #[arg(long)]
         target: Vec<String>,
-        /// Optionally save the exact attestation-bound Canary keys without overwriting.
+    },
+    /// Re-verify the exact statement and evidence retained for one past attempt.
+    VerifyHistory {
+        /// Canary origin. HTTPS is required unless --insecure is set.
         #[arg(long)]
-        keys_out: Option<PathBuf>,
+        url: String,
+        /// Independently verified Canary PCR0/1/2 file.
+        #[arg(
+            long,
+            required_unless_present = "insecure",
+            conflicts_with = "insecure"
+        )]
+        pcrs_file: Option<PathBuf>,
+        /// Demo only: allow HTTP and skip Canary attestation entirely.
+        #[arg(
+            long,
+            required_unless_present = "pcrs_file",
+            conflicts_with = "pcrs_file"
+        )]
+        insecure: bool,
+        /// Operator-enrolled canonical keyset produced by inspect-node --keys-out.
+        #[arg(long)]
+        keys: PathBuf,
+        /// Target ID whose retained attempt should be replayed.
+        #[arg(long)]
+        target: String,
+        /// Attempt ID shown by GET /targets/{id}/history.
+        #[arg(long)]
+        attempt: i64,
     },
 }
 
@@ -233,9 +273,26 @@ fn main() -> Result<()> {
         Command::Verify {
             url,
             pcrs_file,
+            insecure,
+            keys,
             target,
-            keys_out,
-        } => live_verify::run(&url, &pcrs_file, &target, keys_out.as_deref()),
+        } => live_verify::run(&url, pcrs_file.as_deref(), insecure, &keys, &target),
+
+        Command::VerifyHistory {
+            url,
+            pcrs_file,
+            insecure,
+            keys,
+            target,
+            attempt,
+        } => live_verify::run_history(
+            &url,
+            pcrs_file.as_deref(),
+            insecure,
+            &keys,
+            &target,
+            attempt,
+        ),
     }
 }
 

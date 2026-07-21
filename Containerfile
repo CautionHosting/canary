@@ -43,6 +43,11 @@ FROM build AS deployment-inputs
 COPY canary.json /inputs/canary.json
 RUN --mount=type=bind,source=.,target=/context,ro <<-'EOF'
 	set -eux
+	# core-filesystem ships /bin,/lib,/sbin as symlinks into /usr, but a fully
+	# static build never populates those targets, leaving them dangling. The
+	# platform's initramfs packer (Containerfile.eif) does `mkdir -p` through the
+	# symlinks and fails with ENOENT. Materialize the targets so they resolve.
+	install -d /staged/usr/bin /staged/usr/lib /staged/usr/sbin /staged/etc/ssl/certs
 	install -Dm644 /inputs/canary.json /staged/app/canary.json
 	bundle=/context/.caution/quorum-bundle.json
 	secret=/context/.caution/secrets/CANARY_MASTER_SEED.asc

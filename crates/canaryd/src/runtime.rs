@@ -253,7 +253,13 @@ impl Runtime {
                 .await
                 .map_err(RuntimeError::ConfigRead)?;
         }
-        let store = Arc::new(Store::open(&options.database_path).await?);
+        let store = Arc::new(
+            Store::open_with_history_limit(
+                &options.database_path,
+                i64::from(config.config.history_limit),
+            )
+            .await?,
+        );
         let now = canonical_second(clock.now());
         let signing = Arc::new(Semaphore::new(SIGNING_PARALLELISM));
         let mut targets = Vec::with_capacity(config.config.targets.len());
@@ -427,11 +433,13 @@ impl Runtime {
             }
             _ = start.wait() => {}
         }
+        tracing::info!(target_count, "monitor workers started; service is ready");
 
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 self.set_not_ready();
+                tracing::info!("monitor cancellation requested; service is not ready");
                 drain_workers(&mut workers).await;
                 Ok(())
             }
@@ -446,12 +454,14 @@ impl Runtime {
                 }
                 match completed {
                     Some(Ok((worker, Ok(())))) => {
+                        tracing::error!(%worker, "monitor worker exited unexpectedly");
                         self.mark_unhealthy();
                         cancel.cancel();
                         drain_workers(&mut workers).await;
                         Err(RuntimeError::WorkerExited { worker })
                     }
                     Some(Ok((worker, Err(source)))) => {
+                        tracing::error!(%worker, error = %source, "monitor worker failed");
                         self.mark_unhealthy();
                         cancel.cancel();
                         drain_workers(&mut workers).await;
@@ -461,6 +471,7 @@ impl Runtime {
                         })
                     }
                     Some(Err(source)) => {
+                        tracing::error!(error = %source, "monitor worker task failed");
                         self.mark_unhealthy();
                         cancel.cancel();
                         drain_workers(&mut workers).await;
@@ -470,6 +481,7 @@ impl Runtime {
                         })
                     }
                     None => {
+                        tracing::error!("all monitor workers exited unexpectedly");
                         self.mark_unhealthy();
                         cancel.cancel();
                         Err(RuntimeError::WorkerExited {
@@ -495,9 +507,10 @@ impl Runtime {
         // Required immediate startup probe.
         self.probe_index(index, &cancel).await?;
         let mut number = 1u64;
+        let period = Duration::from_secs(self.inner.config.config.probe_interval_seconds);
         loop {
             let jitter = rand::thread_rng().gen_range(0..=5);
-            let due = started + scheduled_offset(number, jitter);
+            let due = started + scheduled_offset(period, number, jitter);
             tokio::select! {
                 _ = cancel.cancelled() => return Ok(()),
                 _ = tokio::time::sleep_until(due) => {}
@@ -560,7 +573,28 @@ impl Runtime {
             attempt = runner.probe(&target, canonical_second(self.inner.clock.now())) => attempt,
         };
         drop(permit);
-        self.apply_attempt(index, attempt).await
+        let target_id = attempt.target_id.clone();
+        let reason = attempt.reason.as_str();
+        let classification = attempt.classification;
+        let latency_ms = u64::try_from(attempt.latency.as_millis()).ok();
+        tracing::debug!(
+            %target_id,
+            %reason,
+            ?classification,
+            ?latency_ms,
+            "probe completed"
+        );
+        self.apply_attempt(index, attempt).await?;
+        if reason != canary_core::evidence::ProbeReason::AllChecksPassed.as_str() {
+            tracing::warn!(
+                %target_id,
+                %reason,
+                ?classification,
+                ?latency_ms,
+                "probe did not verify target"
+            );
+        }
+        Ok(())
     }
 
     async fn apply_attempt(&self, index: usize, attempt: ProbeAttempt) -> Result<(), RuntimeError> {
@@ -568,6 +602,8 @@ impl Runtime {
         let Some(managed) = targets.get_mut(index) else {
             return Ok(());
         };
+        let previous_status = managed.snapshot.status;
+        let previous_reason = managed.snapshot.reason.clone();
         // Runtime publication time is clock-owned; an injected runner cannot
         // move reducer expiry checks independently of the runtime clock.
         let now = canonical_second(self.inner.clock.now());
@@ -639,12 +675,24 @@ impl Runtime {
             .await?;
         managed.snapshot = snapshot;
         self.publish_locked(&targets, now).await;
+        let current = &targets[index].snapshot;
+        if current.status != previous_status || current.reason != previous_reason {
+            tracing::info!(
+                target_id = %current.id,
+                old_status = ?previous_status,
+                old_reason = %previous_reason,
+                new_status = ?current.status,
+                new_reason = %current.reason,
+                "target state changed"
+            );
+        }
         Ok(())
     }
 
     async fn publish_expired(&self, now: DateTime<Utc>) -> Result<(), RuntimeError> {
         let mut targets = self.inner.targets.lock().await;
         let mut changed = false;
+        let mut transitions = Vec::new();
         for managed in targets.iter_mut() {
             let derived = managed.reducer.derive_at(now);
             if derived.definitive_expires_at.is_some()
@@ -663,6 +711,13 @@ impl Runtime {
                 None,
                 None,
             )?;
+            transitions.push((
+                managed.target.id.clone(),
+                managed.snapshot.status,
+                managed.snapshot.reason.clone(),
+                snapshot.status,
+                snapshot.reason.clone(),
+            ));
             self.inner
                 .store
                 .publish_current(CurrentWrite {
@@ -675,6 +730,16 @@ impl Runtime {
         }
         if changed {
             self.publish_locked(&targets, now).await;
+            for (target_id, old_status, old_reason, new_status, new_reason) in transitions {
+                tracing::info!(
+                    %target_id,
+                    ?old_status,
+                    %old_reason,
+                    ?new_status,
+                    %new_reason,
+                    "target state changed after evidence expiry"
+                );
+            }
         }
         Ok(())
     }
@@ -998,8 +1063,9 @@ mod tests {
 
     #[test]
     fn fixed_schedule_has_no_drift() {
-        assert_eq!(scheduled_offset(1, 2), Duration::from_secs(62));
-        assert_eq!(scheduled_offset(2, 2), Duration::from_secs(122));
+        let period = Duration::from_secs(60);
+        assert_eq!(scheduled_offset(period, 1, 2), Duration::from_secs(62));
+        assert_eq!(scheduled_offset(period, 2, 2), Duration::from_secs(122));
     }
 
     #[tokio::test]

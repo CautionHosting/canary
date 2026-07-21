@@ -171,6 +171,8 @@ The repository contains one canonical `canary.json`:
 {
   "version": 0,
   "node_id": "caution-canary-demo",
+  "probe_interval_seconds": 60,
+  "history_limit": 1000,
   "targets": [
     {
       "id": "payments-prod",
@@ -194,7 +196,10 @@ Rules:
 - URLs are absolute HTTPS URLs without credentials or fragments.
 - PCR0/1/2 are present, SHA-384-sized, canonical lowercase hex and nonzero.
 - Unknown fields are rejected so misspellings do not silently weaken policy.
-- Probe interval is fixed at 60 seconds and statement/result TTL at 180 seconds.
+- `probe_interval_seconds` is global, defaults to 60, and is in 6–86,400.
+- `history_limit` is per target, defaults to 1,000, and is in 1–10,000.
+- Statement/result TTL remains fixed at 180 seconds. Longer probe intervals may
+  intentionally produce `STALE` periods between observations.
 
 `config_digest` is `sha256:` followed by the lowercase SHA-256 digest of RFC 8785
 canonical JSON for the parsed configuration. The exact committed config is copied
@@ -208,7 +213,7 @@ A config change requires a commit and a new Caution deployment with a new measur
 
 ### 7.1 Target probe
 
-For each target, every 60 seconds `canaryd`:
+For each target, at the configured global probe interval, `canaryd`:
 
 1. Generates a fresh 32-byte nonce from the operating system CSPRNG.
 2. Sends this standard Bootproof request:
@@ -251,6 +256,11 @@ never taken from the bundle. `observed_at` selects the certificate-validation ti
 for reproducible historical verification; the bundle alone does not prove that time
 or its nonce was fresh. Freshness requires a separately trusted hybrid statement
 binding the same `evidence_digest` and `observed_at`.
+
+The offline CLI may accept `--insecure` instead of `--pcrs-file` only as an explicit
+diagnostic mode. It then self-pins PCR0/1/2 extracted from the signed document while
+retaining chain, signature, time, nonce, canonicalization and digest checks. This does
+not independently verify workload identity or establish freshness for the bundle.
 
 The SDK verification must cover the embedded AWS root chain, certificate validity,
 COSE ES384 signature, exact nonce, and exact PCR0/1/2 equality. Config validation
@@ -303,8 +313,11 @@ not image measurements; they are runtime-bound to that measured enclave by signe
 
 `canaryctl inspect-node --pcrs-file <verified-canary-pcrs> --keys-out <path>` automates
 steps 2 and 3 and atomically saves the exact key document whose digest it verified.
-Without a PCR file it may inspect self-consistency, but must label the measurement as
-TOFU rather than independently reproduced.
+It requires exactly one explicit trust mode: `--pcrs-file` performs independent
+measurement verification, while `--insecure` accepts self-reported PCRs and may use
+HTTP for local demos. In insecure mode the AWS chain, COSE signature, certificate
+time, nonce and config/key bindings remain mandatory, but workload identity is not
+independently established.
 
 ## 8. Signing and key management
 
@@ -515,6 +528,10 @@ There is no PostgreSQL, external volume, replication or backup. Restarting the e
 wipes history by design. SQLite supports only the current status page, recent history
 and demo evidence inspection; it is not a durable audit log.
 
+Each target retains and returns at most the measured `history_limit` most recent
+attempts; the default is 1,000. Pruning is per target and transactional with the new
+attempt and current-state update.
+
 Raw evidence and its nonce may be returned by the evidence endpoint so a third party
 can re-run verification. They are not secrets, but the response must document that a
 Nitro attestation exposes infrastructure metadata.
@@ -648,7 +665,12 @@ git push caution main
 caution verify --save-pcrs
 caution secret send-shard --keyring canary.private.asc
 
-# 6. Inspect config/key bindings, then verify downloaded artifacts offline.
+# 6. Verify the Canary node and every current target claim end to end.
+canaryctl verify \
+  --url https://<canary-host> \
+  --pcrs-file .caution/trusted_hashes.json
+
+# Lower-level/offline equivalents remain available.
 canaryctl inspect-node \
   --url https://<canary-host> \
   --pcrs-file .caution/trusted_hashes.json \

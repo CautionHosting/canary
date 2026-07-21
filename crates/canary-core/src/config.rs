@@ -20,11 +20,31 @@ const PCR_HEX_LEN: usize = 96;
 /// Maximum number of targets allowed in one config (spec §6).
 const MAX_TARGETS: usize = 100;
 
+pub const DEFAULT_PROBE_INTERVAL_SECONDS: u64 = 60;
+/// Must exceed canaryd's five-second jitter so successive anchored due times
+/// cannot move backwards.
+pub const MIN_PROBE_INTERVAL_SECONDS: u64 = 6;
+pub const MAX_PROBE_INTERVAL_SECONDS: u64 = 86_400;
+pub const DEFAULT_HISTORY_LIMIT: u32 = 1_000;
+pub const MAX_HISTORY_LIMIT: u32 = 10_000;
+
+const fn default_probe_interval_seconds() -> u64 {
+    DEFAULT_PROBE_INTERVAL_SECONDS
+}
+
+const fn default_history_limit() -> u32 {
+    DEFAULT_HISTORY_LIMIT
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
     pub node_id: String,
+    #[serde(default = "default_probe_interval_seconds")]
+    pub probe_interval_seconds: u64,
+    #[serde(default = "default_history_limit")]
+    pub history_limit: u32,
     pub targets: Vec<Target>,
 }
 
@@ -81,6 +101,10 @@ pub enum ConfigError {
     NoTargets,
     #[error("too many targets: {0}, limit is {MAX_TARGETS}")]
     TooManyTargets(usize),
+    #[error("probe_interval_seconds must be between {MIN_PROBE_INTERVAL_SECONDS} and {MAX_PROBE_INTERVAL_SECONDS}")]
+    BadProbeInterval,
+    #[error("history_limit must be between 1 and {MAX_HISTORY_LIMIT}")]
+    BadHistoryLimit,
     #[error("target {target_id:?} has an invalid attestation_url: {reason}")]
     InvalidUrl { target_id: String, reason: String },
     #[error("target {target_id:?} attestation_url must not contain credentials")]
@@ -172,6 +196,14 @@ impl Config {
         if self.targets.len() > MAX_TARGETS {
             return Err(ConfigError::TooManyTargets(self.targets.len()));
         }
+        if !(MIN_PROBE_INTERVAL_SECONDS..=MAX_PROBE_INTERVAL_SECONDS)
+            .contains(&self.probe_interval_seconds)
+        {
+            return Err(ConfigError::BadProbeInterval);
+        }
+        if !(1..=MAX_HISTORY_LIMIT).contains(&self.history_limit) {
+            return Err(ConfigError::BadHistoryLimit);
+        }
 
         let mut seen_ids = std::collections::HashSet::with_capacity(self.targets.len() + 1);
         seen_ids.insert(self.node_id.as_str());
@@ -243,7 +275,54 @@ mod tests {
         let config = parse_and_validate(&json).expect("should validate");
         assert_eq!(config.version, 0);
         assert_eq!(config.node_id, "caution-canary-demo");
+        assert_eq!(
+            config.probe_interval_seconds,
+            DEFAULT_PROBE_INTERVAL_SECONDS
+        );
+        assert_eq!(config.history_limit, DEFAULT_HISTORY_LIMIT);
         assert_eq!(config.targets.len(), 1);
+    }
+
+    #[test]
+    fn runtime_limits_are_configurable_and_bounded() {
+        let mut json = valid_config_json();
+        json["probe_interval_seconds"] = serde_json::json!(300);
+        json["history_limit"] = serde_json::json!(2_000);
+        let config = parse_and_validate(&json.to_string()).unwrap();
+        assert_eq!(config.probe_interval_seconds, 300);
+        assert_eq!(config.history_limit, 2_000);
+
+        json["probe_interval_seconds"] = serde_json::json!(MIN_PROBE_INTERVAL_SECONDS - 1);
+        let config: Config = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(
+            config.validate().unwrap_err(),
+            ConfigError::BadProbeInterval
+        );
+
+        json["probe_interval_seconds"] = serde_json::json!(60);
+        json["history_limit"] = serde_json::json!(MAX_HISTORY_LIMIT + 1);
+        let config: Config = serde_json::from_value(json).unwrap();
+        assert_eq!(config.validate().unwrap_err(), ConfigError::BadHistoryLimit);
+    }
+
+    #[test]
+    fn runtime_policy_changes_config_digest() {
+        let base = parse_and_validate(&valid_config_json().to_string()).unwrap();
+        let base_digest = crate::canonical::digest_canonical(&base).unwrap();
+
+        let mut changed_interval = base.clone();
+        changed_interval.probe_interval_seconds += 1;
+        assert_ne!(
+            crate::canonical::digest_canonical(&changed_interval).unwrap(),
+            base_digest
+        );
+
+        let mut changed_history = base;
+        changed_history.history_limit += 1;
+        assert_ne!(
+            crate::canonical::digest_canonical(&changed_history).unwrap(),
+            base_digest
+        );
     }
 
     #[test]

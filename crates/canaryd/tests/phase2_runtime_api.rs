@@ -41,6 +41,8 @@ fn test_config() -> Config {
     Config {
         version: 0,
         node_id: "node-integration".to_owned(),
+        probe_interval_seconds: 60,
+        history_limit: 1_000,
         targets: vec![
             Target {
                 id: "loopback-v4".to_owned(),
@@ -92,6 +94,8 @@ fn fixture_config() -> Config {
     Config {
         version: 0,
         node_id: "node-fixture".to_owned(),
+        probe_interval_seconds: 60,
+        history_limit: 1_000,
         targets: vec![Target {
             id: "aws-test".to_owned(),
             name: "AWS test fixture".to_owned(),

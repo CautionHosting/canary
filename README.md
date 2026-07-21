@@ -56,6 +56,37 @@ canaryctl config add \
 save its PCRs under a distinct name and repeat `config add` without `--node-id`.
 Updating an existing target requires `--replace`.
 
+The generated `canary.json` also carries global runtime policy. For example:
+
+```json
+{
+  "version": 0,
+  "node_id": "company-canary",
+  "probe_interval_seconds": 120,
+  "history_limit": 2000,
+  "targets": [
+    {
+      "id": "payments-prod",
+      "name": "Payments production",
+      "attestation_url": "https://payments.example.com/attestation",
+      "expected_pcrs": {
+        "0": "<96 lowercase hex characters>",
+        "1": "<96 lowercase hex characters>",
+        "2": "<96 lowercase hex characters>"
+      }
+    }
+  ]
+}
+```
+
+Edit `probe_interval_seconds` to change the cadence for every target. It defaults to
+60 seconds and accepts 6–86,400. The example uses two minutes. Claims still expire
+after 180 seconds, so long intervals intentionally leave targets `STALE` between
+probes. `history_limit` is the retained and returned row count per target; it defaults
+to 1,000 and accepts 1–10,000. Both fields are measured policy included in
+`config_digest`; changing either requires a restart locally or a rebuild/redeploy on
+Caution.
+
 ### Trust on first use
 
 This path needs no Caution account. It records the PCRs returned by the live target
@@ -97,6 +128,7 @@ docker buildx build \
 docker run --rm --platform linux/amd64 \
   --publish 127.0.0.1:8080:8080 \
   --env-file .env \
+  --env RUST_LOG=info \
   --volume "$PWD/canary.json:/app/canary.json:ro" \
   caution-canary:local
 ```
@@ -194,7 +226,32 @@ enclave.
 
 ## Verify a deployed Canary
 
-Verify fresh Canary attestation before trusting its public signing keys:
+The normal operator command verifies the Canary node and every configured target end
+to end:
+
+```sh
+canaryctl verify \
+  --url https://canary.example.com \
+  --pcrs-file .caution/trusted_hashes.json
+```
+
+Add `--target payments-prod` to select one target; repeat it to select several.
+`--keys-out trusted-keys.json` optionally saves the exact attestation-bound key
+document, but the combined command otherwise keeps it in memory.
+
+For the Canary node, `--pcrs-file` supplies the independently reproduced PCR0/1/2
+expected from its fresh Nitro attestation. The CLI verifies the AWS chain, COSE
+signature, certificate time, nonce and exact PCR values before trusting the attested
+config and key digests. It then verifies each target statement and its linked evidence
+against the target PCR policy in that attested config.
+
+For local demos only, `--insecure` may replace `--pcrs-file`. It permits HTTP and uses
+the PCRs reported by the live Canary attestation itself. AWS chain/signature, nonce,
+config/key binding, statement and target-evidence verification remain enabled, but the
+Canary workload identity is not independently established.
+
+The lower-level command verifies fresh Canary attestation and saves its public signing
+keys:
 
 ```sh
 canaryctl inspect-node \
@@ -203,7 +260,7 @@ canaryctl inspect-node \
   --keys-out trusted-keys.json
 ```
 
-Then verify a target statement and its linked evidence:
+Then the offline commands can verify a downloaded target statement and evidence:
 
 ```sh
 curl -fsS https://canary.example.com/targets/payments-prod/statement -o statement.json
@@ -218,8 +275,8 @@ canaryctl verify-evidence \
   --pcrs-file .caution/trusted_hashes/payments-prod.json
 ```
 
-`inspect-node` without `--pcrs-file` checks self-consistency only. It does not
-establish that the Canary image matches independently reproduced PCRs.
+`inspect-node` and `verify-evidence` require exactly one of `--pcrs-file` or
+`--insecure`; there is no implicit trust downgrade.
 
 ## HTTP API
 
@@ -230,17 +287,48 @@ establish that the Canary image matches independently reproduced PCRs.
 | `GET /status.json` | Current state for every target |
 | `GET /targets/{id}/statement` | Latest hybrid-signed statement |
 | `GET /targets/{id}/evidence` | Latest Bootproof evidence bundle |
-| `GET /targets/{id}/history` | Up to 100 observations from the current database |
+| `GET /targets/{id}/history` | Up to configured `history_limit` observations; default 1,000 |
 | `GET /config.json` | Measured target configuration and digest |
 | `GET /keys.json` | Ed25519 and ML-DSA-65 public keys |
 
 All endpoints are public. Treat target names, URLs, PCRs, keys, and evidence as
 public information.
 
+### `config_digest` and signed outputs
+
+`config_digest` is `sha256:` plus the SHA-256 of the RFC 8785 canonical form of the
+fully parsed `canary.json`, including defaulted global settings. It prevents a result
+from being moved between different target policies or runtime configurations.
+
+```sh
+curl -fsS https://canary.example.com/config.json
+curl -fsS https://canary.example.com/status.json
+curl -fsS https://canary.example.com/targets/payments-prod/statement
+curl -fsS https://canary.example.com/targets/payments-prod/evidence
+curl -fsS https://canary.example.com/targets/payments-prod/history
+curl -fsS https://canary.example.com/keys.json
+```
+
+- `/config.json` and `/status.json` expose the current `config_digest`, but those JSON
+  responses are not independently signed.
+- `/targets/{id}/statement` carries `payload.config_digest`; the entire payload is
+  signed with both Ed25519 and ML-DSA-65.
+- History rows carry the digest for correlation, but history is diagnostic and
+  unsigned.
+- Evidence does not duplicate `config_digest`. Its digest and observation time are
+  bound by the signed statement, which is in turn bound to the config digest.
+- `/keys.json` has no config digest. Its exact keyset digest and the config digest are
+  jointly bound into the fresh Canary Nitro attestation.
+
+Therefore no extra config signature is needed: `canaryctl verify` checks the fresh
+node attestation, config/key bindings, signed statement, and linked evidence as one
+chain. Raw `curl` output alone is diagnostic and should not be treated as verified.
+
 ## Runtime behavior and limits
 
-- Targets are probed immediately, then every 60 seconds with 0–5 seconds of jitter.
-  At most eight probes run concurrently; each attempt times out after 15 seconds.
+- Targets are probed immediately, then every configured `probe_interval_seconds`
+  (default 60) with 0–5 seconds of jitter. At most eight probes run concurrently;
+  each attempt times out after 15 seconds.
 - A definitive result is valid for 180 seconds. Transport failures can preserve a
   still-valid result with a warning; successful verification recovers immediately.
 - Every process start publishes fresh `PENDING` statements and probes immediately.

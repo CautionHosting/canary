@@ -41,7 +41,11 @@ fn verify_and_report(statement: &Statement, keys: &KeysDocument) -> Result<()> {
     Ok(())
 }
 
-fn verify_at(statement: &Statement, keys: &KeysDocument, now: DateTime<Utc>) -> Result<()> {
+pub(crate) fn verify_at(
+    statement: &Statement,
+    keys: &KeysDocument,
+    now: DateTime<Utc>,
+) -> Result<()> {
     validate_keys_document(statement, keys)?;
     let ed_pk = find_key(keys, ALG_ED25519)?;
     let ml_pk = find_key(keys, ALG_ML_DSA_65)?;

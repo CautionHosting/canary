@@ -15,6 +15,7 @@ use canary_core::keys::KeysDocument;
 use canary_core::node::{ConfigDocument, NodeMetadata};
 use rand::rngs::OsRng;
 use rand::RngCore as _;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -36,20 +37,95 @@ struct AttestationResponse {
     manifest: serde_json::Value,
 }
 
-pub fn run(base_url: &str, pcrs_file: Option<&Path>, keys_out: &Path) -> Result<()> {
-    let base = parse_base_url(base_url)?;
+pub(crate) struct InspectedNode {
+    pub(crate) config: ConfigDocument,
+    pub(crate) keys: KeysDocument,
+    pub(crate) metadata: NodeMetadata,
+    pub(crate) keys_bytes: Vec<u8>,
+    pub(crate) insecure: bool,
+    agent: ureq::Agent,
+    base: Url,
+}
+
+impl InspectedNode {
+    pub(crate) fn get_json<T: DeserializeOwned>(&self, segments: &[&str]) -> Result<T> {
+        let bytes = get(&self.agent, relative_endpoint(&self.base, segments)?)?;
+        serde_json::from_slice(&bytes).context("parsing strict JSON API response")
+    }
+
+    pub(crate) fn get_optional_json<T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+    ) -> Result<Option<T>> {
+        match get_optional(&self.agent, relative_endpoint(&self.base, segments)?)? {
+            Some(bytes) => serde_json::from_slice(&bytes)
+                .context("parsing strict JSON API response")
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn write_keys(&self, path: &Path) -> Result<()> {
+        write_verified_keys(path, &self.keys_bytes)
+    }
+}
+
+enum TrustMode<'a> {
+    TrustedPcrs(&'a Path),
+    SelfPinned {
+        allow_insecure_transport: bool,
+        trust_label: &'static str,
+    },
+}
+
+pub fn run(
+    base_url: &str,
+    pcrs_file: Option<&Path>,
+    insecure: bool,
+    keys_out: &Path,
+) -> Result<()> {
     if keys_out.exists() {
         bail!(
             "refusing to overwrite existing --keys-out {}; choose a new path",
             keys_out.display()
         );
     }
-    let agent = ureq::AgentBuilder::new()
-        .https_only(true)
-        .redirects(0)
-        .timeout_connect(Duration::from_secs(5))
-        .timeout(HTTP_TIMEOUT)
-        .build();
+    let inspected = inspect(base_url, pcrs_file, insecure)?;
+    inspected
+        .write_keys(keys_out)
+        .with_context(|| format!("writing verified keys {}", keys_out.display()))?;
+    if insecure {
+        println!("PASS: Canary config/key binding verified");
+        println!("WARNING: --insecure disabled HTTPS-origin enforcement and independent PCR identity verification.");
+    } else {
+        println!("PASS: Canary config/key binding verified against independently trusted PCRs");
+    }
+    println!("node_id: {}", inspected.metadata.node_id);
+    println!("config_digest: {}", inspected.metadata.config_digest);
+    println!("keyset_digest: {}", inspected.metadata.keyset_digest);
+    println!("keys_out: {}", keys_out.display());
+    Ok(())
+}
+
+pub(crate) fn inspect(
+    base_url: &str,
+    pcrs_file: Option<&Path>,
+    insecure: bool,
+) -> Result<InspectedNode> {
+    let mode = select_trust_mode(pcrs_file, insecure)?;
+    inspect_with_mode(base_url, mode)
+}
+
+fn inspect_with_mode(base_url: &str, mode: TrustMode<'_>) -> Result<InspectedNode> {
+    let allow_insecure_transport = matches!(
+        mode,
+        TrustMode::SelfPinned {
+            allow_insecure_transport: true,
+            ..
+        }
+    );
+    let base = parse_base_url_with_transport(base_url, allow_insecure_transport)?;
+    let agent = http_agent(allow_insecure_transport);
     let config_bytes = get(&agent, endpoint(&base, "config.json")?)?;
     let keys_bytes = get(&agent, endpoint(&base, "keys.json")?)?;
 
@@ -71,29 +147,12 @@ pub fn run(base_url: &str, pcrs_file: Option<&Path>, keys_out: &Path) -> Result<
     if STANDARD.encode(&document) != response.document {
         bail!("/attestation document must use canonical padded standard base64");
     }
-    // `manifest` is intentionally diagnostic-only; parse it above to reject a
-    // malformed response but never turn it into policy.
     let _ = response.manifest;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before UNIX epoch")?;
-    let (expected, trust_label) = if let Some(path) = pcrs_file {
-        let pcrs = TrustedHashesFile::load(path)?.into_expected_pcrs();
-        (
-            pcrs_from_hex(&pcrs.pcr0, &pcrs.pcr1, &pcrs.pcr2)
-                .context("decoding trusted PCR0/1/2")?,
-            "independently trusted PCRs",
-        )
-    } else {
-        let candidate = extract_candidate_pcrs(&document)
-            .context("extracting candidate PCR0/1/2 for TOFU self-consistency")?;
-        (
-            pcrs_from_hex(&candidate.pcr0, &candidate.pcr1, &candidate.pcr2)
-                .context("decoding candidate PCR0/1/2")?,
-            "TOFU/self-consistency PCRs",
-        )
-    };
+    let expected = expected_pcrs_for_document(&mode, &document)?;
     let outcome = verify_evidence(&document, &expected, &nonce, now);
     if !outcome.passed {
         bail!(
@@ -104,22 +163,16 @@ pub fn run(base_url: &str, pcrs_file: Option<&Path>, keys_out: &Path) -> Result<
     let user_data = outcome
         .user_data
         .context("verified Canary attestation is missing signed user_data")?;
-    // `user_data` reaches this helper only after successful COSE/root-chain,
-    // signature, expected-PCR, and fresh-nonce verification above.
     let metadata = validate_verified_binding(&config, &keys, &keys_bytes, &user_data)?;
-    write_verified_keys(keys_out, &keys_bytes)
-        .with_context(|| format!("writing verified keys {}", keys_out.display()))?;
-    if pcrs_file.is_some() {
-        println!("PASS: Canary config/key binding verified against {trust_label}");
-    } else {
-        println!("PASS: Canary config/key binding is internally self-consistent (TOFU)");
-        println!("WARNING: no --pcrs-file was supplied; this is not independently verified or reproduced.");
-    }
-    println!("node_id: {}", metadata.node_id);
-    println!("config_digest: {}", metadata.config_digest);
-    println!("keyset_digest: {}", metadata.keyset_digest);
-    println!("keys_out: {}", keys_out.display());
-    Ok(())
+    Ok(InspectedNode {
+        config,
+        keys,
+        metadata,
+        keys_bytes,
+        insecure: allow_insecure_transport,
+        agent,
+        base,
+    })
 }
 
 /// Check every post-attestation link. Callers must pass `signed_user_data`
@@ -299,9 +352,53 @@ fn write_keys_no_clobber_with_suffixes(
     result
 }
 
-fn parse_base_url(value: &str) -> Result<Url> {
+fn select_trust_mode<'a>(pcrs_file: Option<&'a Path>, insecure: bool) -> Result<TrustMode<'a>> {
+    match (pcrs_file, insecure) {
+        (Some(path), false) => Ok(TrustMode::TrustedPcrs(path)),
+        (None, true) => Ok(TrustMode::SelfPinned {
+            allow_insecure_transport: true,
+            trust_label: "self-pinned PCRs from this attestation",
+        }),
+        (Some(_), true) => bail!("pass exactly one of --pcrs-file or --insecure"),
+        (None, false) => bail!("pass exactly one of --pcrs-file or --insecure"),
+    }
+}
+
+fn http_agent(allow_insecure_transport: bool) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .https_only(!allow_insecure_transport)
+        .redirects(0)
+        .timeout_connect(Duration::from_secs(5))
+        .timeout(HTTP_TIMEOUT)
+        .build()
+}
+
+fn expected_pcrs_for_document(
+    mode: &TrustMode<'_>,
+    document: &[u8],
+) -> Result<std::collections::HashMap<u8, Vec<u8>>> {
+    match mode {
+        TrustMode::TrustedPcrs(path) => {
+            let pcrs = TrustedHashesFile::load(path)?.into_expected_pcrs();
+            pcrs_from_hex(&pcrs.pcr0, &pcrs.pcr1, &pcrs.pcr2).context("decoding trusted PCR0/1/2")
+        }
+        TrustMode::SelfPinned { trust_label, .. } => {
+            let candidate = extract_candidate_pcrs(document)
+                .with_context(|| format!("extracting candidate PCR0/1/2 for {trust_label}"))?;
+            pcrs_from_hex(&candidate.pcr0, &candidate.pcr1, &candidate.pcr2)
+                .with_context(|| format!("decoding candidate PCR0/1/2 for {trust_label}"))
+        }
+    }
+}
+
+fn parse_base_url_with_transport(value: &str, allow_insecure_transport: bool) -> Result<Url> {
     let mut url = Url::parse(value).context("parsing --url")?;
-    if url.scheme() != "https"
+    let allowed_scheme = if allow_insecure_transport {
+        matches!(url.scheme(), "http" | "https")
+    } else {
+        url.scheme() == "https"
+    };
+    if !allowed_scheme
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
@@ -309,6 +406,9 @@ fn parse_base_url(value: &str) -> Result<Url> {
         || url.fragment().is_some()
         || (url.path() != "/" && !url.path().is_empty())
     {
+        if allow_insecure_transport {
+            bail!("--url must be an HTTP or HTTPS origin with no credentials, query, fragment, or path");
+        }
         bail!("--url must be an HTTPS origin with no credentials, query, fragment, or path");
     }
     url.set_path("/");
@@ -322,12 +422,38 @@ fn endpoint(base: &Url, name: &str) -> Result<Url> {
     base.join(name).context("constructing fixed endpoint URL")
 }
 
+fn relative_endpoint(base: &Url, segments: &[&str]) -> Result<Url> {
+    if segments.is_empty() {
+        bail!("relative API path must contain at least one path segment");
+    }
+    for segment in segments {
+        if segment.is_empty()
+            || matches!(*segment, "." | "..")
+            || !segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            bail!("relative API path contains an unsafe segment");
+        }
+    }
+    base.join(&segments.join("/"))
+        .context("constructing relative API path URL")
+}
+
 fn get(agent: &ureq::Agent, url: Url) -> Result<Vec<u8>> {
     let response = agent
         .get(url.as_str())
         .call()
         .with_context(|| format!("GET {url}"))?;
     read_limited(response.into_reader())
+}
+
+fn get_optional(agent: &ureq::Agent, url: Url) -> Result<Option<Vec<u8>>> {
+    match agent.get(url.as_str()).call() {
+        Ok(response) => read_limited(response.into_reader()).map(Some),
+        Err(ureq::Error::Status(404, _)) => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("GET {url}")),
+    }
 }
 
 fn post_nonce(agent: &ureq::Agent, url: Url, nonce: &[u8; 32]) -> Result<Vec<u8>> {
@@ -391,7 +517,7 @@ mod tests {
 
     #[test]
     fn base_url_is_an_https_origin_only() {
-        assert!(parse_base_url("https://example.com").is_ok());
+        assert!(parse_base_url_with_transport("https://example.com", false).is_ok());
         for bad in [
             "http://example.com",
             "https://u@example.com",
@@ -399,18 +525,58 @@ mod tests {
             "https://example.com/?q=x",
             "https://example.com/#x",
         ] {
-            assert!(parse_base_url(bad).is_err(), "{bad}");
+            assert!(parse_base_url_with_transport(bad, false).is_err(), "{bad}");
         }
     }
 
     #[test]
+    fn exact_mode_selection_requires_one_trust_source() {
+        let path = Path::new("trusted_hashes.json");
+        assert!(matches!(
+            select_trust_mode(Some(path), false).unwrap(),
+            TrustMode::TrustedPcrs(_)
+        ));
+        assert!(matches!(
+            select_trust_mode(None, true).unwrap(),
+            TrustMode::SelfPinned {
+                allow_insecure_transport: true,
+                ..
+            }
+        ));
+        assert!(select_trust_mode(Some(path), true).is_err());
+        assert!(select_trust_mode(None, false).is_err());
+    }
+
+    #[test]
+    fn insecure_transport_allows_http_origin_only_in_explicit_mode() {
+        assert!(parse_base_url_with_transport("http://example.com", true).is_ok());
+        assert!(parse_base_url_with_transport("http://example.com", false).is_err());
+    }
+
+    #[test]
     fn only_fixed_endpoint_names_are_joined() {
-        let base = parse_base_url("https://example.com").unwrap();
+        let base = parse_base_url_with_transport("https://example.com", false).unwrap();
         assert_eq!(
             endpoint(&base, "keys.json").unwrap().as_str(),
             "https://example.com/keys.json"
         );
         assert!(endpoint(&base, "../keys.json").is_err());
+    }
+
+    #[test]
+    fn relative_api_paths_reject_traversal_and_queries() {
+        let base = parse_base_url_with_transport("https://example.com", false).unwrap();
+        assert_eq!(
+            relative_endpoint(&base, &["targets", "demo", "statement"])
+                .unwrap()
+                .as_str(),
+            "https://example.com/targets/demo/statement"
+        );
+        assert!(relative_endpoint(&base, &[]).is_err());
+        assert!(relative_endpoint(&base, &["targets", "", "statement"]).is_err());
+        assert!(relative_endpoint(&base, &["targets", "..", "statement"]).is_err());
+        assert!(relative_endpoint(&base, &["targets", "demo?x=1", "statement"]).is_err());
+        assert!(relative_endpoint(&base, &["targets", "demo", "$statement"]).is_err());
     }
 
     #[test]

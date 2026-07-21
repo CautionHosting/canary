@@ -5,7 +5,9 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use canary_core::canonical::digest_canonical;
-use canary_core::config::{Config, ExpectedPcrs, Target};
+use canary_core::config::{
+    Config, ExpectedPcrs, Target, DEFAULT_HISTORY_LIMIT, DEFAULT_PROBE_INTERVAL_SECONDS,
+};
 use serde::Deserialize;
 
 use crate::atomic_file;
@@ -52,6 +54,8 @@ pub fn load_or_create_config(path: &Path, node_id: Option<&str>) -> Result<Confi
         Ok(Config {
             version: 0,
             node_id: node_id.to_string(),
+            probe_interval_seconds: DEFAULT_PROBE_INTERVAL_SECONDS,
+            history_limit: DEFAULT_HISTORY_LIMIT,
             targets: Vec::new(),
         })
     }

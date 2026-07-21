@@ -15,8 +15,9 @@ use sqlx::{
 
 use crate::model::{AttemptWrite, CurrentWrite, HistoryEntry, TargetSnapshot};
 
-/// Maximum number of retained attempts per target (spec §12 / approved plan).
-pub const HISTORY_LIMIT: i64 = 100;
+/// Default retained attempts per target. Runtime config may select a different
+/// validated limit for a specific measured deployment.
+pub const DEFAULT_HISTORY_LIMIT_ROWS: i64 = canary_core::config::DEFAULT_HISTORY_LIMIT as i64;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
@@ -46,6 +47,8 @@ pub enum StoreError {
     },
     #[error("latency value {0} is outside the supported range")]
     InvalidLatency(u64),
+    #[error("history limit must be positive")]
+    InvalidHistoryLimit,
 }
 
 /// The successfully committed material.  The scheduler must publish the
@@ -77,28 +80,49 @@ struct CurrentMaterial {
 #[derive(Debug, Clone)]
 pub struct Store {
     pool: SqlitePool,
+    history_limit: i64,
 }
 
 impl Store {
     /// Open a SQLite database and apply the embedded workspace migrations.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with_history_limit(path, DEFAULT_HISTORY_LIMIT_ROWS).await
+    }
+
+    pub async fn open_with_history_limit(
+        path: impl AsRef<Path>,
+        history_limit: i64,
+    ) -> Result<Self, StoreError> {
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
             .foreign_keys(true);
-        Self::open_options(options).await
+        Self::open_options(options, history_limit).await
     }
 
     /// Open a database URL and apply the embedded workspace migrations.
     /// This is useful for hermetic `sqlite::memory:` tests.
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
+        Self::connect_with_history_limit(database_url, DEFAULT_HISTORY_LIMIT_ROWS).await
+    }
+
+    pub async fn connect_with_history_limit(
+        database_url: &str,
+        history_limit: i64,
+    ) -> Result<Self, StoreError> {
         let options = SqliteConnectOptions::from_str(database_url)?
             .foreign_keys(true)
             .create_if_missing(true);
-        Self::open_options(options).await
+        Self::open_options(options, history_limit).await
     }
 
-    async fn open_options(options: SqliteConnectOptions) -> Result<Self, StoreError> {
+    async fn open_options(
+        options: SqliteConnectOptions,
+        history_limit: i64,
+    ) -> Result<Self, StoreError> {
+        if history_limit < 1 {
+            return Err(StoreError::InvalidHistoryLimit);
+        }
         // A single connection makes `sqlite::memory:` deterministic and avoids
         // a second connection seeing a separate in-memory database.
         let pool = SqlitePoolOptions::new()
@@ -106,10 +130,14 @@ impl Store {
             .connect_with(options)
             .await?;
         MIGRATOR.run(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            history_limit,
+        })
     }
 
-    /// Commit an attempt, prune this target to the newest 100 rows, and write
+    /// Commit an attempt, prune this target to its configured history limit,
+    /// and write
     /// the current signed state/evidence in one transaction.
     ///
     /// A failure returns before a receipt exists, so callers cannot legally
@@ -184,7 +212,7 @@ impl Store {
         )
         .bind(&attempt.target.id)
         .bind(&attempt.target.id)
-        .bind(HISTORY_LIMIT)
+        .bind(self.history_limit)
         .execute(&mut *tx)
         .await?;
 
@@ -299,7 +327,7 @@ impl Store {
              ORDER BY attempted_at DESC, id DESC LIMIT ?",
         )
         .bind(target_id)
-        .bind(HISTORY_LIMIT)
+        .bind(self.history_limit)
         .fetch_all(&self.pool)
         .await?;
 
@@ -501,12 +529,18 @@ mod tests {
     static NEXT_DB: AtomicU64 = AtomicU64::new(0);
 
     async fn store() -> (TempDir, Store) {
+        store_with_history_limit(DEFAULT_HISTORY_LIMIT_ROWS).await
+    }
+
+    async fn store_with_history_limit(history_limit: i64) -> (TempDir, Store) {
         let dir = tempfile::tempdir().expect("temp directory");
         let path = dir.path().join(format!(
             "canary-{}.sqlite3",
             NEXT_DB.fetch_add(1, Ordering::Relaxed)
         ));
-        let store = Store::open(&path).await.expect("migrations apply");
+        let store = Store::open_with_history_limit(&path, history_limit)
+            .await
+            .expect("migrations apply");
         (dir, store)
     }
 
@@ -809,15 +843,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prune_is_per_target_and_keeps_the_newest_hundred() {
-        let (_dir, store) = store().await;
+    async fn prune_is_per_target_and_uses_the_configured_limit() {
+        const LIMIT: i64 = 100;
+        let (_dir, store) = store_with_history_limit(LIMIT).await;
         for second in 0..101 {
             store.commit(attempt("one", second, true)).await.unwrap();
         }
         store.commit(attempt("two", 0, true)).await.unwrap();
 
         let one = store.history("one").await.unwrap();
-        assert_eq!(one.len(), HISTORY_LIMIT as usize);
+        assert_eq!(one.len(), LIMIT as usize);
         assert_eq!(one.first().unwrap().attempted_at, at(100));
         assert_eq!(one.last().unwrap().attempted_at, at(1));
         assert_eq!(store.history("two").await.unwrap().len(), 1);

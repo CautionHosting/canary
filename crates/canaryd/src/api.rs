@@ -375,6 +375,8 @@ mod tests {
         ConfigDocument::new(Config {
             version: 0,
             node_id: "node-a".to_owned(),
+            probe_interval_seconds: 60,
+            history_limit: 1_000,
             targets: vec![Target {
                 id: "target-a".to_owned(),
                 name: "Target A".to_owned(),
@@ -605,7 +607,7 @@ mod tests {
     #[tokio::test]
     async fn history_is_newest_first_bounded_and_excludes_raw_material() {
         let state = state(true).await;
-        for second in 0..102 {
+        for second in 0..1_002 {
             let target = target(Some(evidence()));
             state
                 .store
@@ -627,7 +629,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let value: Value = serde_json::from_slice(&body).unwrap();
         let history = value["observations"].as_array().unwrap();
-        assert_eq!(history.len(), 100);
+        assert_eq!(history.len(), 1_000);
         assert!(
             history[0]["attempted_at"].as_str() > history[1]["attempted_at"].as_str(),
             "history must be newest first"
@@ -653,6 +655,9 @@ mod tests {
         let page = String::from_utf8(body).unwrap();
         assert!(!page.contains("<img src=x"));
         assert!(!page.contains("<script>"));
+        assert!(page.contains("<meta name=\"viewport\""));
+        assert!(page.contains("class=\"target-card status-verified\""));
+        assert!(page.contains("class=\"status-badge\""));
         assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;"));
         assert!(page.contains("Raw Nitro evidence can expose infrastructure metadata"));
         assert!(page.contains("&quot;&lt;&amp;&#x27;"));

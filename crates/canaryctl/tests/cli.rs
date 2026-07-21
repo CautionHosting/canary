@@ -305,14 +305,48 @@ fn capture_rejects_insecure_url_before_network_or_write() {
 fn inspect_node_rejects_non_https_origin_without_writing_keys() {
     let dir = TempDir::new("inspect-http");
     let keys = dir.join("keys.json");
+    let pcrs = dir.join("trusted_hashes.json");
     let output = run(&[
         "inspect-node",
         "--url",
         "http://canary.example.com",
+        "--pcrs-file",
+        path_arg(&pcrs),
         "--keys-out",
         path_arg(&keys),
     ]);
     assert!(!output.status.success());
     assert!(!keys.exists());
     assert!(String::from_utf8_lossy(&output.stderr).contains("HTTPS origin"));
+}
+
+#[test]
+fn verification_commands_require_an_explicit_trust_mode() {
+    let dir = TempDir::new("trust-mode");
+    let keys = dir.join("keys.json");
+    let evidence = dir.join("evidence.json");
+
+    let inspect = run(&[
+        "inspect-node",
+        "--url",
+        "https://canary.example.com",
+        "--keys-out",
+        path_arg(&keys),
+    ]);
+    assert!(!inspect.status.success());
+    let inspect_error = String::from_utf8_lossy(&inspect.stderr);
+    assert!(inspect_error.contains("--pcrs-file"));
+    assert!(inspect_error.contains("--insecure"));
+
+    let evidence = run(&["verify-evidence", "--evidence", path_arg(&evidence)]);
+    assert!(!evidence.status.success());
+    let evidence_error = String::from_utf8_lossy(&evidence.stderr);
+    assert!(evidence_error.contains("--pcrs-file"));
+    assert!(evidence_error.contains("--insecure"));
+
+    let live = run(&["verify", "--url", "https://canary.example.com"]);
+    assert!(!live.status.success());
+    let live_error = String::from_utf8_lossy(&live.stderr);
+    assert!(live_error.contains("--pcrs-file"));
+    assert!(live_error.contains("--insecure"));
 }

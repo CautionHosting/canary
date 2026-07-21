@@ -1,6 +1,6 @@
 //! `canaryd` — the in-enclave Canary service (Phase 2).
 
-use std::future::IntoFuture as _;
+use std::{future::IntoFuture as _, process::ExitCode};
 
 use canaryd::{
     api::router,
@@ -9,18 +9,47 @@ use canaryd::{
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+async fn main() -> ExitCode {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("canaryd=info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    if let Err(error) = run().await {
+        tracing::error!(error = ?error, "canaryd terminated with an error");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+async fn run() -> anyhow::Result<()> {
+    tracing::info!("starting canaryd");
     let runtime = Runtime::initialize(RuntimeOptions::from_environment()?).await?;
+    let config = runtime.config_document();
+    tracing::info!(
+        node_id = %config.config.node_id,
+        config_digest = %config.config_digest,
+        target_count = config.config.targets.len(),
+        probe_interval_seconds = config.config.probe_interval_seconds,
+        history_limit = config.config.history_limit,
+        "runtime initialized"
+    );
     let cancellation = CancellationToken::new();
     let signal = cancellation.clone();
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        signal.cancel();
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                tracing::info!("shutdown signal received");
+                signal.cancel();
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to install shutdown signal handler");
+                signal.cancel();
+            }
+        }
     });
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+    const LISTEN_ADDRESS: &str = "0.0.0.0:8080";
+    let listener = tokio::net::TcpListener::bind(LISTEN_ADDRESS).await?;
+    tracing::info!(listen_address = LISTEN_ADDRESS, "HTTP listener bound");
     let monitor = runtime.clone();
     let monitor_token = cancellation.clone();
     let mut monitor_task =
@@ -45,5 +74,6 @@ async fn main() -> anyhow::Result<()> {
             monitor_task.await??;
         }
     }
+    tracing::info!("canaryd shutdown complete");
     Ok(())
 }

@@ -84,21 +84,48 @@ docker run --rm --platform linux/amd64 \
 Never commit `.env`; it contains the root signing seed. Local history is discarded
 when the container stops.
 
-For a Caution deployment, copy and complete `caution.hcl.template`, then run
-`caution init`, commit the measured inputs, and `git push caution main`. Choose one
-identity mode:
+For a Caution deployment, copy `caution.hcl.template` to `caution.hcl`, set its public
+source URL and HTTPS domain, then choose one identity mode:
 
 - **Ephemeral:** set `args = ["--ephemeral-identity"]` for a disposable monitor.
   A restart creates a new signing keyset.
-- **Stable:** create the seed with `canaryctl identity create`, encrypt
-  `CANARY_MASTER_SEED` through Locksmith, and release the required shards after
-  deployment. The signing keyset survives restarts.
+- **Stable:** keep the `env::vault("CANARY_MASTER_SEED")` block and prepare the
+  encrypted seed:
 
-After deploying Canary, reproduce and save its own PCRs:
+  ```sh
+  canaryctl identity create --env-file .env
+  caution secret keygen canary.asc \
+    --name "Canary POC" --email canary@example.com --shoot-self-in-foot
+  export KEYMAKER_URL=https://keymaker.example.com
+  caution secret new canary.asc --threshold 1 --max 1
+  caution secret encrypt --env-file .env CANARY_MASTER_SEED
+  ```
+
+  This 1-of-1 key is for evaluation only. Use separate protected shard holders in
+  production.
+
+Initialize after selecting the identity mode. Commit `canary.json`, `caution.hcl`,
+deployment metadata, and—only in stable mode—the public quorum bundle and encrypted
+seed. Never commit `.env` or `canary.private.asc`.
 
 ```sh
+caution init
+git add canary.json caution.hcl .caution/deployment.json
+# Stable mode only:
+git add .caution/quorum-bundle.json .caution/secrets/CANARY_MASTER_SEED.asc
+git commit -m "Configure Canary deployment"
+git push caution main
 caution verify --save-pcrs
 ```
+
+In stable mode, release the seed only after verification:
+
+```sh
+caution secret send-shard --keyring canary.private.asc
+```
+
+The stable signing keyset survives restarts. An ephemeral Canary creates a new keyset
+and must be enrolled again after every restart.
 
 ### 4. Enroll Canary, then verify deployments
 
@@ -119,7 +146,7 @@ canaryctl verify \
 Keep `canary-keys.json` as an integrity-critical public trust file. Enrollment never
 overwrites it. Select specific deployments with repeated `--deployment payments-prod`.
 
-Outside Caution there is no Canary attestation. Pin the first observed keyset only
+The local Docker flow has no Canary attestation. Pin its first observed keyset only
 with the explicit local TOFU mode:
 
 ```sh
@@ -134,9 +161,10 @@ canaryctl verify \
   --keys canary-keys.json
 ```
 
-`--insecure` skips only Canary's own attestation. It still checks both statement
-signatures, deployment Nitro evidence, and deployment PCR0/1/2, but it does not
-authenticate the original Canary identity or its configured deployment policy.
+`--insecure` skips Canary's own attestation. It still pins Canary's keys and checks
+both signatures on every result. For a `VERIFIED` result it also checks the linked
+deployment Nitro evidence and PCR0/1/2. It does not authenticate the original Canary
+identity or configured deployment policy.
 
 ## Web UI
 
@@ -173,7 +201,7 @@ canaryctl artifact verify-statement \
 
 canaryctl artifact verify-evidence \
   --evidence evidence.json \
-  --pcrs .caution/trusted_hashes/payments-prod.json
+  --pcrs .caution/trusted_hashes.json
 ```
 
 These are partial checks. Use `canaryctl verify` for the complete current or
@@ -187,7 +215,7 @@ emits one machine-readable result.
 - Every result requires Ed25519 and ML-DSA-65 signatures. Nitro's upstream attestation
   chain remains AWS-rooted and classical.
 - Deployment names, URLs, PCRs, keys, statements, evidence, and metadata are public.
-- History is process-local and is not a durable audit log.
+- History is enclave/container-local and is not a durable audit log.
 - Canary has no application-traffic binding, automatic replica discovery, or
   application-correctness proof.
 

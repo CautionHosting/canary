@@ -130,9 +130,9 @@ origin_count="$(jq -r '
 ' "$CONFIG")" || die "every target attestation_url must have an HTTPS origin"
 [[ "$origin_count" -ge 2 ]] || die "canary.json must enroll at least two unique HTTPS origins"
 
-# `config add --replace` parses the full config with canaryctl's strict
+# `deployment add --replace` parses the full config with canaryctl's strict
 # deny-unknown-fields schema, then rewrites a temporary copy. A byte-for-byte
-# comparison proves the committed file is the canonical output of config add.
+# comparison proves the committed file is canonical `deployment add` output.
 first_id="$(jq -r '.targets[0].id' "$CONFIG")"
 first_name="$(jq -r '.targets[0].name' "$CONFIG")"
 first_url="$(jq -r '.targets[0].attestation_url' "$CONFIG")"
@@ -141,15 +141,15 @@ jq '{pcr0: .targets[0].expected_pcrs["0"], pcr1: .targets[0].expected_pcrs["1"],
   "$CONFIG" >"$tmp_dir/pcrs.json"
 (
   cd "$ROOT"
-  cargo run --quiet --locked -p canaryctl -- config add \
+  cargo run --quiet --locked -p canaryctl -- deployment add \
     --config "$tmp_dir/canary.json" \
     --id "$first_id" \
     --name "$first_name" \
-    --attestation-url "$first_url" \
-    --pcrs-file "$tmp_dir/pcrs.json" \
+    --url "$first_url" \
+    --pcrs "$tmp_dir/pcrs.json" \
     --replace >/dev/null
 ) || die "canaryctl rejected canary.json"
 cmp -s "$CONFIG" "$tmp_dir/canary.json" \
-  || die "canary.json was not produced by canonical canaryctl config add output"
+  || die "canary.json was not produced by canonical canaryctl deployment add output"
 
 printf 'deployment inputs are release-valid\n'

@@ -166,6 +166,47 @@ both signatures on every result. For a `VERIFIED` result it also checks the link
 deployment Nitro evidence and PCR0/1/2. It does not authenticate the original Canary
 identity or configured deployment policy.
 
+## Per-target webhook watcher
+
+Run the external watcher when different Canary targets need different notification
+routes:
+
+```sh
+cp canary-watch.example.json canary-watch.json
+export PAYMENTS_WEBHOOK_SECRET="$(openssl rand -base64 32)"
+export PAYMENTS_ONCALL_SECRET="$(openssl rand -base64 32)"
+export AI_WEBHOOK_SECRET="$(openssl rand -base64 32)"
+canaryctl watch --config canary-watch.json
+```
+
+Each target can fan out to multiple webhooks. The watcher performs the same complete
+live verification as `canaryctl verify` before sending a target event; it does not
+probe target attestation endpoints itself. It also sends signed heartbeats and
+Canary-wide outage or trust-failure events. Webhook secrets are base64-encoded
+32-byte HMAC keys loaded from the named environment variables and never belong in
+the config file. On a normal host, inject them with its secret manager. If the
+watcher is deployed as its own Caution application, expose each name through
+`env::vault(...)` and protect the encrypted values with Locksmith; this does not
+change the Canary deployment.
+
+`canary-watch.json` is deliberately separate from measured `canary.json`, so changing
+alert routing does not rebuild the Canary enclave. Relative PCR and key paths resolve
+from the watcher config's directory. Restart the watcher after editing its config.
+For local testing, omit `canary.pcrs` and use
+`--insecure-canary --allow-http-webhooks`; those flags must not be used in production.
+
+Every POST contains `schema_version`, `event`, `event_id`, `timestamp`, `canary`, and
+`data`. Verify the receiver-facing headers against the exact request body:
+
+- `X-Canary-Event-Id`
+- `X-Canary-Timestamp`
+- `X-Canary-Signature: v1=<hex HMAC-SHA256(timestamp + "." + body)>`
+
+Retries reuse the same event ID, timestamp, body, and signature. Target events are
+`target.status_changed`, `target.read_failed`, and `target.read_recovered`; watcher
+events are `canary.unavailable`, `canary.verification_failed`, `canary.recovered`,
+and `watcher.heartbeat`.
+
 ## Web UI
 
 Open `https://canary.example.com/` (or `http://localhost:8080/` locally) for current

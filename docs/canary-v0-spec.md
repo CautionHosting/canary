@@ -32,8 +32,8 @@ This V0 implements a small coherent Canary system:
 
 It intentionally defers customer-approved source-release policies, signed Reproducer
 input, application-traffic key binding, independent client/widget consumption,
-multi-region verification, alerts and durable evidence. These capabilities are outside
-V0 and are not specified in this repository.
+multi-region verification and durable evidence. The optional external webhook watcher
+does not expand the measured V0 service or its trust claim.
 
 ## 2. V0 decisions
 
@@ -50,7 +50,7 @@ V0 and are not specified in this repository.
 | Secret material | Stable: one random Locksmith-injected master seed. Ephemeral: one fresh process-local CSPRNG seed. Both use the same domain-separated child-key derivation |
 | Storage | Enclave-local SQLite under `/tmp`; wiped on enclave restart |
 | API | Public read-only status, evidence, config and key endpoints |
-| Alerts | None; no webhooks or webhook secret in V0 |
+| Alerts | None inside `canaryd`; an optional external watcher may consume verified results |
 | Timestamping | No OpenTimestamps or pre-quantum ceremony |
 | Policy updates | Edit config, commit, deploy a new measured Canary image |
 
@@ -152,6 +152,8 @@ flowchart LR
 - Generating a random stable master seed for later Locksmith encryption.
 - Enrolling a deployed Canary's attestation, config and key bindings.
 - Verifying signed statements and evidence bundles offline.
+- Optionally polling those verified results and delivering per-target webhooks from
+  a separate, unmeasured watcher configuration.
 
 Caution/Bootproof owns Canary's public `POST /attestation`. `canaryd` must not
 implement or proxy that endpoint itself. The status surface may check whether
@@ -859,7 +861,8 @@ Not in V0:
 
 - PostgreSQL, external persistence or a durable transparency log.
 - OpenTimestamps or proof that the node existed before a future cryptographic break.
-- Webhooks, alert routing or a webhook secret.
+- Webhooks, alert routing or a webhook secret inside `canaryd` or measured
+  `canary.json`.
 - Customer approval/countersignature flows.
 - Multiple independent verifiers or quorum evaluation.
 - Live config reload or mutable policy management APIs.
@@ -868,14 +871,13 @@ Not in V0:
 
 Likely next steps, only after V0 is demonstrated:
 
-1. Add an external watchdog/alert consumer so Canary outages are observable.
-2. Add signed independent reproduction statements and distinguish continuity from
+1. Add signed independent reproduction statements and distinguish continuity from
    source reproduction.
-3. Add customer approval and co-verifier signer objects only when their semantics and
+2. Add customer approval and co-verifier signer objects only when their semantics and
    operational ownership are clear.
-4. Add durable external storage or a transparency log if audit retention becomes a
+3. Add durable external storage or a transparency log if audit retention becomes a
    real requirement.
-5. Add replica discovery and independently consumed traffic-path claims.
+4. Add replica discovery and independently consumed traffic-path claims.
 
 OpenTimestamps is intentionally deferred. It becomes useful only if V0 later makes a
 specific historical claim whose value exceeds the cost of operating and explaining a

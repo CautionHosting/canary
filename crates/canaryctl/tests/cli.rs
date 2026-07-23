@@ -286,6 +286,33 @@ fn parsed_json_errors_are_one_json_object() {
 }
 
 #[test]
+fn watch_rejects_one_shot_json_output_before_loading_config() {
+    let output = run(&[
+        "--json",
+        "watch",
+        "--config",
+        "/definitely/missing/canary-watch.json",
+    ]);
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
+    let rendered: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(rendered["command"], "watch");
+    assert!(rendered["error"]
+        .as_str()
+        .unwrap()
+        .contains("not supported"));
+
+    let verbose = run(&[
+        "--verbose",
+        "watch",
+        "--config",
+        "/definitely/missing/canary-watch.json",
+    ]);
+    assert!(!verbose.status.success());
+    assert!(String::from_utf8_lossy(&verbose.stderr).contains("not supported"));
+}
+
+#[test]
 fn offline_evidence_verification_uses_public_fixture_and_rejects_replay() {
     let dir = TempDir::new("evidence");
     let evidence_path = dir.join("evidence.json");

@@ -27,14 +27,71 @@ pub(crate) struct VerificationOutcome {
     identity: String,
     scope: String,
     attempt: Option<i64>,
-    deployments: Vec<DeploymentResult>,
+    /// The identity and measured configuration that authenticated the target
+    /// results below. These are intentionally available to in-process
+    /// consumers such as the long-running watcher; the existing CLI renderers
+    /// retain their stable public output.
+    pub(crate) node_id: String,
+    pub(crate) config_digest: String,
+    pub(crate) deployments: Vec<DeploymentResult>,
     verbose: String,
 }
 
-struct DeploymentResult {
-    id: String,
-    status: String,
-    reason: String,
+/// A target result whose statement, configuration binding, signatures,
+/// freshness, and (when present) evidence have all been verified.
+pub(crate) struct VerifiedTargetResult {
+    pub(crate) id: String,
+    pub(crate) status: Status,
+    pub(crate) reason: String,
+    pub(crate) statement: Statement,
+}
+
+/// A per-target transport, parsing, or consistent-snapshot read failure. This
+/// is deliberately distinct from both authenticated non-VERIFIED statements
+/// and cryptographic/configuration verification failures.
+pub(crate) struct TargetReadError {
+    pub(crate) id: String,
+    pub(crate) reason: String,
+}
+
+/// A target response was fetched, but its signatures, freshness, config
+/// binding, or evidence relationship could not be authenticated.
+pub(crate) struct TargetVerificationError {
+    pub(crate) id: String,
+    pub(crate) reason: String,
+}
+
+/// The outcome of reading one configured target from an otherwise verified
+/// Canary node.
+pub(crate) enum DeploymentResult {
+    Verified(Box<VerifiedTargetResult>),
+    ReadError(TargetReadError),
+    VerificationError(TargetVerificationError),
+}
+
+impl DeploymentResult {
+    fn id(&self) -> &str {
+        match self {
+            Self::Verified(result) => &result.id,
+            Self::ReadError(error) => &error.id,
+            Self::VerificationError(error) => &error.id,
+        }
+    }
+
+    fn status_text(&self) -> &'static str {
+        match self {
+            Self::Verified(result) => status_text(result.status),
+            Self::ReadError(_) | Self::VerificationError(_) => "ERROR",
+        }
+    }
+
+    fn reason(&self) -> &str {
+        match self {
+            Self::Verified(result) => &result.reason,
+            Self::ReadError(error) => &error.reason,
+            Self::VerificationError(error) => &error.reason,
+        }
+    }
 }
 
 impl VerificationOutcome {
@@ -42,7 +99,7 @@ impl VerificationOutcome {
         let verified = self
             .deployments
             .iter()
-            .filter(|deployment| deployment.status == "VERIFIED")
+            .filter(|deployment| deployment.status_text() == "VERIFIED")
             .count();
         let canary = match (self.trust.as_str(), self.identity.as_str()) {
             ("TOFU", _) => {
@@ -63,14 +120,16 @@ impl VerificationOutcome {
             canary,
         );
         for deployment in &self.deployments {
-            let detail = if deployment.status == "VERIFIED" {
+            let detail = if deployment.status_text() == "VERIFIED" {
                 "PCR0/1/2 + signatures"
             } else {
-                &deployment.reason
+                deployment.reason()
             };
             output.push_str(&format!(
                 "\n{}  {}  {}",
-                deployment.id, deployment.status, detail
+                deployment.id(),
+                deployment.status_text(),
+                detail
             ));
         }
         output
@@ -83,9 +142,9 @@ impl VerificationOutcome {
             "scope": self.scope,
             "attempt": self.attempt,
             "deployments": self.deployments.iter().map(|deployment| json!({
-                "id": deployment.id,
-                "status": deployment.status,
-                "reason": deployment.reason,
+                "id": deployment.id(),
+                "status": deployment.status_text(),
+                "reason": deployment.reason(),
             })).collect::<Vec<_>>(),
         })
     }
@@ -124,21 +183,32 @@ pub fn run(
             Ok(report) => {
                 authenticated_negative |= report.status != Status::Verified;
                 verbose.push_str(&target_report_text(target, &report, node.trust));
-                deployments.push(DeploymentResult {
+                deployments.push(DeploymentResult::Verified(Box::new(VerifiedTargetResult {
                     id: target.id.clone(),
-                    status: status_text(report.status).to_owned(),
-                    reason: report.reason,
-                });
+                    status: report.status,
+                    reason: report.reason.clone(),
+                    statement: report.statement,
+                })));
             }
-            Err(error) => {
+            Err(TargetFetchError::Read(error)) => {
                 operational_error = true;
                 let reason = format!("{error:#}");
                 verbose.push_str(&format!("\nDEPLOYMENT {}\n  Verification            ERROR\n  Error                   {}\n", target.id, reason));
-                deployments.push(DeploymentResult {
+                deployments.push(DeploymentResult::ReadError(TargetReadError {
                     id: target.id.clone(),
-                    status: "ERROR".to_owned(),
                     reason,
-                });
+                }));
+            }
+            Err(TargetFetchError::Verification(error)) => {
+                operational_error = true;
+                let reason = format!("{error:#}");
+                verbose.push_str(&format!("\nDEPLOYMENT {}\n  Verification            ERROR\n  Error                   {}\n", target.id, reason));
+                deployments.push(DeploymentResult::VerificationError(
+                    TargetVerificationError {
+                        id: target.id.clone(),
+                        reason,
+                    },
+                ));
             }
         }
     }
@@ -148,6 +218,8 @@ pub fn run(
         identity: identity_text(&node),
         scope: "current".to_owned(),
         attempt: None,
+        node_id: node.config.config.node_id.clone(),
+        config_digest: node.config.config_digest.clone(),
         deployments,
         verbose,
     })
@@ -249,11 +321,14 @@ pub fn run_history(
         identity: identity_text(&node),
         scope: "history".to_owned(),
         attempt: Some(attempt_id),
-        deployments: vec![DeploymentResult {
+        node_id: node.config.config.node_id.clone(),
+        config_digest: node.config.config_digest.clone(),
+        deployments: vec![DeploymentResult::Verified(Box::new(VerifiedTargetResult {
             id: target_id.to_owned(),
-            status: status_text(report.status).to_owned(),
-            reason: report.reason,
-        }],
+            status: report.status,
+            reason: report.reason.clone(),
+            statement: report.statement,
+        }))],
         verbose,
     })
 }
@@ -284,6 +359,7 @@ fn select_targets<'a>(config: &'a ConfigDocument, requested: &[String]) -> Resul
 struct TargetReport {
     status: Status,
     reason: String,
+    statement: Statement,
     evidence_replayed: bool,
     target_origin: String,
     observed_at: Option<String>,
@@ -302,6 +378,7 @@ impl TargetReport {
         Self {
             status: statement.payload.status,
             reason: statement.payload.reason.clone(),
+            statement: statement.clone(),
             evidence_replayed,
             target_origin: statement.payload.target_origin.clone(),
             observed_at: statement.payload.observed_at.clone(),
@@ -313,7 +390,18 @@ impl TargetReport {
     }
 }
 
-fn fetch_and_verify_target(node: &InspectedNode, target: &Target) -> Result<TargetReport> {
+#[derive(Debug)]
+enum TargetFetchError {
+    Read(anyhow::Error),
+    Verification(anyhow::Error),
+}
+
+type TargetFetchResult<T> = std::result::Result<T, TargetFetchError>;
+
+fn fetch_and_verify_target(
+    node: &InspectedNode,
+    target: &Target,
+) -> TargetFetchResult<TargetReport> {
     fetch_and_verify_target_at(node, target, Utc::now())
 }
 
@@ -321,7 +409,7 @@ fn fetch_and_verify_target_at(
     node: &InspectedNode,
     target: &Target,
     now: DateTime<Utc>,
-) -> Result<TargetReport> {
+) -> TargetFetchResult<TargetReport> {
     let statement_path = ["targets", target.id.as_str(), "statement"];
     let evidence_path = ["targets", target.id.as_str(), "evidence"];
     fetch_and_verify_target_with(
@@ -347,21 +435,23 @@ fn fetch_and_verify_target_with<GetStatement, GetEvidence>(
     now: DateTime<Utc>,
     mut get_statement: GetStatement,
     mut get_evidence: GetEvidence,
-) -> Result<TargetReport>
+) -> TargetFetchResult<TargetReport>
 where
     GetStatement: FnMut() -> Result<Statement>,
     GetEvidence: FnMut() -> Result<Option<EvidenceBundle>>,
 {
     for _ in 0..SNAPSHOT_RETRIES {
-        let statement = get_statement()?;
-        verify_statement_binding(config, keys, target, &statement, now)?;
+        let statement = get_statement().map_err(TargetFetchError::Read)?;
+        verify_statement_binding(config, keys, target, &statement, now)
+            .map_err(TargetFetchError::Verification)?;
 
         let Some(expected_digest) = statement.payload.evidence_digest.as_deref() else {
-            return verify_target_artifacts(config, keys, target, &statement, None, now);
+            return verify_target_artifacts(config, keys, target, &statement, None, now)
+                .map_err(TargetFetchError::Verification);
         };
 
-        let evidence = get_evidence()?;
-        let statement_after = get_statement()?;
+        let evidence = get_evidence().map_err(TargetFetchError::Read)?;
+        let statement_after = get_statement().map_err(TargetFetchError::Read)?;
 
         if statement != statement_after {
             continue;
@@ -375,12 +465,13 @@ where
             continue;
         }
 
-        return verify_target_artifacts(config, keys, target, &statement, Some(&evidence), now);
+        return verify_target_artifacts(config, keys, target, &statement, Some(&evidence), now)
+            .map_err(TargetFetchError::Verification);
     }
 
-    bail!(
+    Err(TargetFetchError::Read(anyhow::anyhow!(
         "could not obtain a consistent statement/evidence snapshot after {SNAPSHOT_RETRIES} attempts"
-    )
+    )))
 }
 
 fn verify_target_artifacts(
@@ -863,35 +954,55 @@ mod tests {
 
     #[test]
     fn concise_and_json_renderers_keep_trust_and_failure_meaning() {
+        let (_, _, verified_statement, _, _) =
+            fixture(Status::Verified, "ALL_CHECKS_PASSED", PCR_0_AND_1);
         let attested = VerificationOutcome {
             ok: true,
             trust: "ATTESTED".to_owned(),
             identity: "stable".to_owned(),
             scope: "current".to_owned(),
             attempt: None,
-            deployments: vec![DeploymentResult {
+            node_id: "canary-main".to_owned(),
+            config_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            deployments: vec![DeploymentResult::Verified(Box::new(VerifiedTargetResult {
                 id: "payments-prod".to_owned(),
-                status: "VERIFIED".to_owned(),
+                status: Status::Verified,
                 reason: "ALL_CHECKS_PASSED".to_owned(),
-            }],
+                statement: verified_statement,
+            }))],
             verbose: String::new(),
         };
         let text = attested.concise_text();
         assert!(text.contains("VERIFIED  1/1 deployment"));
         assert!(text.contains("Canary: ATTESTED (stable identity)"));
         assert!(text.contains("PCR0/1/2 + signatures"));
+        match &attested.deployments[0] {
+            DeploymentResult::Verified(result) => {
+                assert_eq!(result.status, Status::Verified);
+                assert_eq!(result.statement.payload.target_id, "payments-prod");
+            }
+            DeploymentResult::ReadError(_) | DeploymentResult::VerificationError(_) => {
+                panic!("authenticated statement became an error")
+            }
+        }
 
+        let (_, _, failed_statement, _, _) = fixture(Status::Failed, "PCR_MISMATCH", PCR_0_AND_1);
         let tofu_negative = VerificationOutcome {
             ok: false,
             trust: "TOFU".to_owned(),
             identity: "unknown".to_owned(),
             scope: "current".to_owned(),
             attempt: None,
-            deployments: vec![DeploymentResult {
+            node_id: "canary-main".to_owned(),
+            config_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            deployments: vec![DeploymentResult::Verified(Box::new(VerifiedTargetResult {
                 id: "payments-prod".to_owned(),
-                status: "FAILED".to_owned(),
+                status: Status::Failed,
                 reason: "PCR_MISMATCH".to_owned(),
-            }],
+                statement: failed_statement,
+            }))],
             verbose: String::new(),
         };
         let text = tofu_negative.concise_text();
@@ -903,6 +1014,56 @@ mod tests {
             tofu_negative.json_result()["deployments"][0]["reason"],
             "PCR_MISMATCH"
         );
+
+        let read_error = DeploymentResult::ReadError(TargetReadError {
+            id: "payments-prod".to_owned(),
+            reason: "fetching signed statement: timeout".to_owned(),
+        });
+        assert_eq!(read_error.status_text(), "ERROR");
+        assert_eq!(read_error.reason(), "fetching signed statement: timeout");
+
+        let verification_error = DeploymentResult::VerificationError(TargetVerificationError {
+            id: "payments-prod".to_owned(),
+            reason: "statement signature verification failed".to_owned(),
+        });
+        assert_eq!(verification_error.status_text(), "ERROR");
+        assert_eq!(
+            verification_error.reason(),
+            "statement signature verification failed"
+        );
+    }
+
+    #[test]
+    fn live_fetch_classifies_read_and_verification_errors() {
+        let (config, keys, mut statement, _, now) =
+            fixture(Status::Verified, "ALL_CHECKS_PASSED", PCR_0_AND_1);
+        let target = &config.config.targets[0];
+
+        let read_error = fetch_and_verify_target_with(
+            &config,
+            &keys,
+            target,
+            now,
+            || Err(anyhow::anyhow!("transport timeout")),
+            || Ok(None),
+        )
+        .unwrap_err();
+        assert!(matches!(read_error, TargetFetchError::Read(_)));
+
+        statement.payload.target_id = "substituted-target".to_owned();
+        let verification_error = fetch_and_verify_target_with(
+            &config,
+            &keys,
+            target,
+            now,
+            || Ok(statement.clone()),
+            || Ok(None),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            verification_error,
+            TargetFetchError::Verification(_)
+        ));
     }
 
     #[test]

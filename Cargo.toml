@@ -19,6 +19,7 @@ bootproof-sdk = { git = "https://git.distrust.co/public/bootproof", rev = "78f53
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 fips204 = "0.4"
 hkdf = "0.12"
+hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }

@@ -9,6 +9,8 @@ mod live_verify;
 mod seed;
 mod verify;
 mod verify_evidence;
+mod watch;
+mod watch_config;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -30,10 +32,10 @@ const DEFAULT_KEYS_FILE: &str = "canary-keys.json";
     about = "Caution Canary operator CLI (V0)"
 )]
 struct Cli {
-    /// Emit one machine-readable JSON result object.
+    /// Emit one machine-readable JSON result object for a one-shot command.
     #[arg(long, global = true, conflicts_with = "verbose")]
     json: bool,
-    /// Include verification-chain diagnostics and digests.
+    /// Include verification-chain diagnostics for a one-shot command.
     #[arg(long, global = true, conflicts_with = "json")]
     verbose: bool,
     #[command(subcommand)]
@@ -56,6 +58,8 @@ enum Command {
     Enroll(EnrollArgs),
     /// Verify current deployments, or one retained historical attempt.
     Verify(VerifyArgs),
+    /// Continuously verify Canary and deliver signed per-target webhooks.
+    Watch(WatchArgs),
     /// Expert partial checks for standalone protocol artifacts.
     Artifact {
         #[command(subcommand)]
@@ -159,6 +163,19 @@ struct VerifyArgs {
     attempt: Option<i64>,
 }
 
+#[derive(Args)]
+struct WatchArgs {
+    /// Path to the external watcher routing configuration.
+    #[arg(long, default_value = "canary-watch.json")]
+    config: PathBuf,
+    /// Local only: allow HTTP and skip Canary attestation.
+    #[arg(long)]
+    insecure_canary: bool,
+    /// Local only: allow HTTP webhook URLs.
+    #[arg(long)]
+    allow_http_webhooks: bool,
+}
+
 #[derive(Subcommand)]
 enum ArtifactCommand {
     /// Verify a signed statement against separately trusted keys.
@@ -201,6 +218,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Identity { .. } => "identity.create",
         Command::Enroll(_) => "enroll",
         Command::Verify(_) => "verify",
+        Command::Watch(_) => "watch",
         Command::Artifact {
             command: ArtifactCommand::VerifyStatement { .. },
         } => "artifact.verify-statement",
@@ -210,7 +228,7 @@ fn command_name(command: &Command) -> &'static str {
     }
 }
 
-fn execute(command: Command, json_mode: bool, _verbose: bool) -> Result<Outcome> {
+fn execute(command: Command, json_mode: bool, verbose_mode: bool) -> Result<Outcome> {
     match command {
         Command::Deployment {
             command: DeploymentCommand::Add(args),
@@ -358,6 +376,25 @@ fn execute(command: Command, json_mode: bool, _verbose: bool) -> Result<Outcome>
                 result: outcome.json_result(),
                 concise: outcome.concise_text(),
                 verbose: Some(outcome.verbose_text()),
+            })
+        }
+        Command::Watch(args) => {
+            if json_mode || verbose_mode {
+                bail!("--json and --verbose are not supported by the long-running watch command")
+            }
+            let config = watch_config::WatchConfig::load(&args.config, args.allow_http_webhooks)?;
+            watch::run(
+                &config,
+                watch::WatchOptions {
+                    insecure_canary: args.insecure_canary,
+                },
+            )?;
+            Ok(Outcome {
+                command: "watch",
+                ok: true,
+                result: Value::Null,
+                concise: "WATCH STOPPED".to_owned(),
+                verbose: None,
             })
         }
         Command::Artifact {

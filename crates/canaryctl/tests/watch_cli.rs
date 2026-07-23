@@ -305,8 +305,7 @@ fn start_watcher_with_poll(
             "watch",
             "--config",
             watcher_path.to_str().unwrap(),
-            "--insecure-canary",
-            "--allow-http-webhooks",
+            "--insecure",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());

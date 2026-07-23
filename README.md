@@ -173,10 +173,8 @@ routes:
 
 ```sh
 cp canary-watch.example.json canary-watch.json
-export PAYMENTS_WEBHOOK_SECRET="$(openssl rand -base64 32)"
-export PAYMENTS_ONCALL_SECRET="$(openssl rand -base64 32)"
-export AI_WEBHOOK_SECRET="$(openssl rand -base64 32)"
-canaryctl watch --config canary-watch.json
+export PQ_WEBHOOK_SECRET="$(openssl rand -base64 32)"
+canaryctl watch --config canary-watch.json --insecure
 ```
 
 Each target can fan out to multiple webhooks. The watcher performs the same complete
@@ -192,8 +190,9 @@ change the Canary deployment.
 `canary-watch.json` is deliberately separate from measured `canary.json`, so changing
 alert routing does not rebuild the Canary enclave. Relative PCR and key paths resolve
 from the watcher config's directory. Restart the watcher after editing its config.
-For local testing, omit `canary.pcrs` and use
-`--insecure-canary --allow-http-webhooks`; those flags must not be used in production.
+For local testing, pass `--insecure` to allow HTTP webhook URLs. If the Canary itself
+is local and uses HTTP, also omit `canary.pcrs`; the same flag then skips Canary's own
+attestation. `--insecure` must not be used in production.
 
 Every POST contains `schema_version`, `event`, `event_id`, `timestamp`, `canary`, and
 `data`. Verify the receiver-facing headers against the exact request body:
@@ -214,8 +213,16 @@ status. Each deployment has a compact overview and history view with ready-to-co
 local `canaryctl verify` commands. Statement, evidence, and history JSON remain
 available as secondary inspection artifacts.
 
-Treat the page as a status surface. Run `canaryctl` with your own PCR and key inputs
-for independent verification.
+![Canary status dashboard](readme_images/canaryd.png)
+
+![Deployment compact overview](readme_images/probe-demo.png)
+
+![Deployment history view](readme_images/history-demo.png)
+
+The home-page self-check reports whether `/dev/nsm` is visible, scheduler readiness,
+identity lifecycle, and the running binary/config digests. That environment result is
+a self-reported runtime hint, not remote proof. Run `canaryctl` with your own PCR and
+key inputs to verify fresh Canary attestation and its config/key bindings externally.
 
 ## Advanced checks
 

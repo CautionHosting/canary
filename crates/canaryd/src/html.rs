@@ -89,6 +89,29 @@ h1 { margin: 0; color: #f2f8fa; font-size: clamp(34px, 5vw, 54px); font-weight: 
 .trust-note strong { color: var(--warning); font-weight: 650; }
 .trust-note p { margin: 0; color: #aab7be; }
 
+.self-check {
+  --self-check-color: var(--warning);
+  margin: 0 0 42px;
+  overflow: hidden;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--self-check-color) 5%, var(--surface)) 0%, var(--surface) 55%);
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--self-check-color);
+}
+.self-check--enclave { --self-check-color: var(--success); }
+.self-check-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 20px 22px 18px; background: rgba(18, 27, 34, .68); border-bottom: 1px solid var(--border); }
+.self-check-kicker { display: block; margin-bottom: 4px; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.self-check h2 { margin: 0; color: #edf5f8; font-size: 18px; font-weight: 550; }
+.self-check-badge { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; color: var(--self-check-color); background: color-mix(in srgb, var(--self-check-color) 10%, transparent); border: 1px solid color-mix(in srgb, var(--self-check-color) 38%, transparent); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
+.self-check-badge::before { content: ""; width: 7px; height: 7px; background: currentColor; border-radius: 50%; box-shadow: 0 0 9px currentColor; }
+.self-check-summary { margin: 0; padding: 18px 22px 0; color: #aab8bf; }
+.self-check-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px 28px; margin: 0; padding: 20px 22px 22px; }
+.self-check-grid .detail--wide { grid-column: 1 / -1; }
+.self-check-value { color: var(--self-check-color); font-weight: 650; }
+.self-check-boundary { display: grid; grid-template-columns: 180px minmax(0, 1fr) auto; align-items: center; gap: 18px; padding: 15px 22px; background: rgba(7, 11, 14, .52); border-top: 1px solid var(--border); }
+.self-check-boundary strong { color: var(--warning); font-size: 12px; }
+.self-check-boundary p { margin: 0; color: var(--muted); font-size: 12px; }
+.self-check-boundary a { white-space: nowrap; font-size: 11px; }
+
 .verify-box { margin: 0 0 46px; padding: 22px; border: 1px solid var(--border); background: rgba(14, 21, 27, .38); }
 .verify-box-head { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; margin-bottom: 12px; }
 .verify-box h2, .section-heading h2 { margin: 0; color: #edf5f8; font-size: 17px; font-weight: 550; }
@@ -151,6 +174,7 @@ dialog::backdrop { background: rgba(1, 5, 8, .82); backdrop-filter: blur(5px); }
 .panel-intro p { max-width: 760px; margin: 0; color: #9cabb3; }
 .panel-intro strong { color: var(--text); }
 .panel-links { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px 184px; }
+.panel-links--history { justify-content: flex-end; margin: 0 0 12px; }
 .inspector-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 26px; margin: 0 0 24px 184px; }
 .inspector-details .detail--wide { grid-column: 1 / -1; }
 .artifact-output { min-height: 180px; margin: 0; padding: 18px; overflow: auto; color: #bdcbd1; background: #070b0e; border: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.58 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -174,7 +198,9 @@ dialog::backdrop { background: rgba(1, 5, 8, .82); backdrop-filter: blur(5px); }
   .shell { padding: 42px 18px 58px; }
   .topline { display: block; }
   .raw-nav { justify-content: flex-start; margin-top: 24px; }
-  .node-meta, .targets { grid-template-columns: 1fr; }
+  .node-meta, .targets, .self-check-grid { grid-template-columns: 1fr; }
+  .self-check-grid .detail--wide { grid-column: auto; }
+  .self-check-boundary { grid-template-columns: 1fr; gap: 7px; }
   .panel-intro { grid-template-columns: 1fr; gap: 8px; }
   .panel-links, .inspector-details, .panel-verify { margin-left: 0; }
 }
@@ -223,8 +249,8 @@ const INSPECTOR: &str = r##"</main>
     </section>
     <section class="panel" data-panel="history" role="tabpanel" hidden>
       <div class="panel-intro"><h3>Recorded attempts</h3><p>Use a row’s command to replay that exact signed result locally. Failed transport attempts may not have evidence to replay.</p></div>
+      <div class="panel-links panel-links--history"><a class="raw-link" id="history-json-link" href="#">History JSON</a></div>
       <div class="artifact-output" data-artifact-output data-state="idle">Select History to load recorded attempts.</div>
-      <div class="panel-links"><a class="raw-link" id="history-json-link" href="#">History JSON</a></div>
     </section>
   </div>
 </dialog>
@@ -250,6 +276,7 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
         snapshot.runtime.identity_mode,
     ));
     page.push_str("</p></div></header>");
+    push_self_check(&mut page, snapshot);
     page.push_str("<section class=\"targets-section\" aria-labelledby=\"targets-heading\"><div class=\"section-heading\"><h2 id=\"targets-heading\">Deployments</h2><span class=\"target-count\">");
     page.push_str(&snapshot.targets.len().to_string());
     page.push_str(if snapshot.targets.len() == 1 {
@@ -326,6 +353,45 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
     page
 }
 
+fn push_self_check(page: &mut String, snapshot: &RuntimeSnapshot) {
+    let is_enclave = snapshot.runtime.environment == ExecutionEnvironment::NitroEnclave;
+    page.push_str("<section class=\"self-check");
+    if is_enclave {
+        page.push_str(" self-check--enclave");
+    }
+    page.push_str("\" aria-labelledby=\"self-check-heading\"><header class=\"self-check-head\"><div><span class=\"self-check-kicker\">Node integrity</span><h2 id=\"self-check-heading\">Canary self-check</h2></div><span class=\"self-check-badge\">");
+    page.push_str(if is_enclave {
+        "NSM DETECTED"
+    } else {
+        "LOCAL RUNTIME"
+    });
+    page.push_str("</span></header><p class=\"self-check-summary\">");
+    page.push_str(if is_enclave {
+        "This process can access the AWS Nitro Security Module. The service is ready and publishing an immutable runtime identity."
+    } else {
+        "No AWS Nitro Security Module is visible. The service is ready, but its initial identity and measured configuration are not remotely attested."
+    });
+    page.push_str("</p><dl class=\"self-check-grid\"><div class=\"detail\"><dt>Execution environment</dt><dd class=\"self-check-value\">");
+    page.push_str(environment_label(snapshot.runtime.environment));
+    page.push_str("</dd></div><div class=\"detail\"><dt>Service</dt><dd class=\"self-check-value\">READY</dd></div><div class=\"detail\"><dt>Identity</dt><dd>");
+    page.push_str(identity_mode_label(snapshot.runtime.identity_mode));
+    page.push_str(
+        "</dd></div><div class=\"detail detail--wide\"><dt>Running binary</dt><dd><code>",
+    );
+    push_escaped(page, &snapshot.runtime.binary_digest);
+    page.push_str(
+        "</code></dd></div><div class=\"detail detail--wide\"><dt>Config digest</dt><dd><code>",
+    );
+    push_escaped(page, &snapshot.config_digest);
+    page.push_str("</code></dd></div></dl><div class=\"self-check-boundary\"><strong>External verification required</strong><p>");
+    page.push_str(if is_enclave {
+        "NSM detection is self-reported. canaryctl verifies fresh nonce-bound Nitro evidence, expected Canary PCR0/1/2, and the attested config and key bindings."
+    } else {
+        "Use the explicit insecure workflow only for development. It verifies signer continuity and target evidence, but the initial Canary identity and policy remain TOFU."
+    });
+    page.push_str("</p><a href=\"#verify-heading\">Verification steps →</a></div></section>");
+}
+
 fn push_verification_guide(
     page: &mut String,
     environment: ExecutionEnvironment,
@@ -364,6 +430,13 @@ fn environment_token(environment: ExecutionEnvironment) -> &'static str {
     match environment {
         ExecutionEnvironment::NitroEnclave => "nitro_enclave",
         ExecutionEnvironment::NonEnclave => "non_enclave",
+    }
+}
+
+fn environment_label(environment: ExecutionEnvironment) -> &'static str {
+    match environment {
+        ExecutionEnvironment::NitroEnclave => "Nitro enclave detected",
+        ExecutionEnvironment::NonEnclave => "Non-enclave runtime",
     }
 }
 

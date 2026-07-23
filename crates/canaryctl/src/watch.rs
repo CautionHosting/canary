@@ -91,10 +91,10 @@ fn validate_trust_mode(pcrs: Option<&std::path::Path>, insecure_canary: bool) ->
     match (pcrs, insecure_canary) {
         (Some(_), false) | (None, true) => {}
         (Some(_), true) => {
-            bail!("canary.pcrs must be omitted when --insecure-canary is used")
+            bail!("canary.pcrs must be omitted when an HTTP Canary uses --insecure")
         }
         (None, false) => {
-            bail!("canary.pcrs is required unless --insecure-canary is used")
+            bail!("canary.pcrs is required unless --insecure is used")
         }
     }
     Ok(())

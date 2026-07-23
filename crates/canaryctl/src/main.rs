@@ -168,12 +168,9 @@ struct WatchArgs {
     /// Path to the external watcher routing configuration.
     #[arg(long, default_value = "canary-watch.json")]
     config: PathBuf,
-    /// Local only: allow HTTP and skip Canary attestation.
+    /// Local only: allow HTTP webhooks and, without canary.pcrs, an unattested HTTP Canary.
     #[arg(long)]
-    insecure_canary: bool,
-    /// Local only: allow HTTP webhook URLs.
-    #[arg(long)]
-    allow_http_webhooks: bool,
+    insecure: bool,
 }
 
 #[derive(Subcommand)]
@@ -382,11 +379,11 @@ fn execute(command: Command, json_mode: bool, verbose_mode: bool) -> Result<Outc
             if json_mode || verbose_mode {
                 bail!("--json and --verbose are not supported by the long-running watch command")
             }
-            let config = watch_config::WatchConfig::load(&args.config, args.allow_http_webhooks)?;
+            let config = watch_config::WatchConfig::load(&args.config, args.insecure)?;
             watch::run(
                 &config,
                 watch::WatchOptions {
-                    insecure_canary: args.insecure_canary,
+                    insecure_canary: args.insecure && config.canary.pcrs.is_none(),
                 },
             )?;
             Ok(Outcome {

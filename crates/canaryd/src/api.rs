@@ -818,8 +818,8 @@ mod tests {
                 < page.find("id=\"evidence-json-link\"").unwrap()
         );
         assert!(
-            page.find("data-artifact-output").unwrap()
-                < page.find("id=\"history-json-link\"").unwrap()
+            page.find("id=\"history-json-link\"").unwrap()
+                < page.find("data-artifact-output").unwrap()
         );
         assert!(!page.contains("01 / Claim"));
         assert!(!page.contains("02 / Proof"));
@@ -830,6 +830,11 @@ mod tests {
         assert!(page.contains("canaryctl enroll"));
         assert!(page.contains("data-runtime-environment=\"non_enclave\""));
         assert!(page.contains("data-identity-mode=\"stable\""));
+        assert!(page.contains("id=\"self-check-heading\""));
+        assert!(page.contains("LOCAL RUNTIME"));
+        assert!(page.contains("Non-enclave runtime"));
+        assert!(page.contains("External verification required"));
+        assert!(page.contains(&digest('d')));
         assert!(page.contains("TOFU:"));
         assert!(page.find("Deployments").unwrap() < page.find("Verify locally").unwrap());
         assert!(!page.contains("Continuity monitor / V0"));
@@ -855,6 +860,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let page = String::from_utf8(body).unwrap();
         assert!(page.contains("data-runtime-environment=\"nitro_enclave\""));
+        assert!(page.contains("NSM DETECTED"));
+        assert!(page.contains("Nitro enclave detected"));
         assert!(page.contains("ATTESTED:"));
         assert!(page.contains("caution verify --save-pcrs"));
         assert!(page.contains("--pcrs .caution/trusted_hashes.json"));

@@ -1,8 +1,8 @@
 {
   "version": 1,
   "canary": {
-    "url": "https://canary.example.com",
-    "pcrs": "./canary-pcrs.json",
+    "url": "https://canary.kobl.one",
+    "pcrs": ".caution/trusted_hashes.json",
     "keys": "./canary-keys.json"
   },
   "poll_interval_seconds": 30,
@@ -10,27 +10,12 @@
   "failure_threshold": 3,
   "targets": [
     {
-      "id": "payments-prod",
+      "id": "pq-demo-hook",
       "webhooks": [
         {
-          "id": "payments-ops",
-          "url": "https://alerts.example.com/payments",
-          "secret_env": "PAYMENTS_WEBHOOK_SECRET"
-        },
-        {
-          "id": "payments-oncall",
-          "url": "https://oncall.example.com/hooks/canary",
-          "secret_env": "PAYMENTS_ONCALL_SECRET"
-        }
-      ]
-    },
-    {
-      "id": "ai-prod",
-      "webhooks": [
-        {
-          "id": "ai-ops",
-          "url": "https://alerts.example.com/ai",
-          "secret_env": "AI_WEBHOOK_SECRET"
+          "id": "pq-demo-hook",
+          "url": "http://localhost:8443",
+          "secret_env": "PQ_WEBHOOK_SECRET"
         }
       ]
     }

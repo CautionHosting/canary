@@ -313,6 +313,16 @@ fn watch_rejects_one_shot_json_output_before_loading_config() {
 }
 
 #[test]
+fn watch_exposes_one_explicit_local_testing_flag() {
+    let output = run(&["watch", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--insecure"));
+    assert!(!help.contains("--insecure-canary"));
+    assert!(!help.contains("--allow-http-webhooks"));
+}
+
+#[test]
 fn offline_evidence_verification_uses_public_fixture_and_rejects_replay() {
     let dir = TempDir::new("evidence");
     let evidence_path = dir.join("evidence.json");

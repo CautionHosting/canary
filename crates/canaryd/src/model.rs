@@ -6,7 +6,7 @@
 //! state after a restart.
 
 use canary_core::{
-    evidence::EvidenceBundle,
+    evidence::{AuthenticatedPcrClaims, EvidenceBundle},
     node::IdentityMode,
     statement::{Statement, Status},
 };
@@ -49,6 +49,9 @@ pub struct TargetSnapshot {
     pub transport_warning: Option<String>,
     pub statement: Statement,
     pub evidence: Option<EvidenceBundle>,
+    /// Derived PCRs retained only after the evidence chain, COSE signature,
+    /// and probe nonce have been authenticated.
+    pub evidence_claims: Option<AuthenticatedPcrClaims>,
 }
 
 /// Atomically published process-local state.  A scheduler replaces the whole
@@ -82,6 +85,9 @@ pub struct AttemptWrite {
     /// Raw evidence returned by this attempt only. Transport attempts that
     /// retain current evidence must leave this `None`.
     pub attempt_evidence: Option<EvidenceBundle>,
+    /// Authenticated PCR claims for this exact attempt. Transport and
+    /// unauthenticated evidence failures leave this absent.
+    pub attempt_evidence_claims: Option<AuthenticatedPcrClaims>,
     pub attempt_transport_warning: Option<String>,
     pub latency_ms: Option<u64>,
     pub config_digest: String,
@@ -147,9 +153,13 @@ pub struct HistoryEntry {
 /// `observation` is unsigned diagnostic metadata. `statement` is the signed
 /// post-attempt Canary claim, while `evidence` is the exact nonce-bound target
 /// attestation bundle received by that attempt when one could be decoded.
+/// `evidence_claims` is retained internally for the separate derived-claims
+/// route and is deliberately omitted from this replay envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoricalAttempt {
     pub observation: HistoryEntry,
     pub statement: Statement,
     pub evidence: Option<EvidenceBundle>,
+    #[serde(skip_serializing)]
+    pub evidence_claims: Option<AuthenticatedPcrClaims>,
 }

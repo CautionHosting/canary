@@ -271,6 +271,12 @@ rejects all-zero/debug PCR policies.
 The sibling `manifest` is unsigned. V0 may record its digest for diagnostics, but it
 must never use the manifest to establish expected PCRs or claim source provenance.
 
+The raw bundle above remains frozen. A separate derived claims view may expose
+observed PCR0/1/2, configured expected PCR0/1/2 and per-PCR equality. Observed values
+must be omitted unless the AWS chain, COSE signature and challenge nonce were
+authenticated against that same document. The derived view is diagnostic JSON, is
+not included in `evidence_digest`, and does not replace replaying the raw bundle.
+
 ### 7.2 No direct Nitro access
 
 `canaryd` and `canaryctl` are verifier/consumer applications. Their source must not:
@@ -580,6 +586,7 @@ from the current enclave lifetime:
 - Target ID, attempt and observation timestamps.
 - State, stable reason and latency.
 - Evidence, evidence digest and challenge nonce when a response exists.
+- Separately derived observed/expected PCR claims only after evidence authentication.
 - Diagnostic manifest digest.
 - Config digest and signed statement.
 
@@ -611,8 +618,10 @@ assumes target names, URLs, PCRs, public keys and attestation evidence are publi
 | `GET /status.json` | `canaryd` | Current state summary, runtime-environment hint and executable digest |
 | `GET /targets/{id}/statement` | `canaryd` | Latest hybrid-signed statement |
 | `GET /targets/{id}/evidence` | `canaryd` | Latest raw Bootproof evidence bundle and digest |
+| `GET /targets/{id}/evidence/claims` | `canaryd` | Versioned derived view of authenticated observed PCR0/1/2, configured policy and match results |
 | `GET /targets/{id}/history` | `canaryd` | Bounded current-lifetime observation history |
 | `GET /targets/{id}/history/{attempt_id}` | `canaryd` | Exact retained statement and evidence for one attempt |
+| `GET /targets/{id}/history/{attempt_id}/evidence/claims` | `canaryd` | Versioned derived PCR claims for one retained attempt |
 | `GET /config.json` | `canaryd` | `{ "config": <canonical config>, "config_digest": "sha256:..." }` |
 | `GET /keys.json` | `canaryd` | Canonical hybrid public key set |
 | `POST /attestation` | Caution Bootproofd | Fresh attestation for the Canary enclave itself |
@@ -630,13 +639,24 @@ resolved by `current_exe()` at startup. It identifies the exact daemon bytes for
 correlation, but it is also self-reported and does not replace independently
 reproduced Canary PCR0/1/2 or fresh node attestation.
 
+When the server reports `nitro_enclave`, the page may challenge `POST /attestation`
+with a fresh browser-generated nonce and use same-origin JavaScript to check
+certificate signatures to the pinned AWS Nitro root, certificate dates, COSE ES384
+and the nonce before displaying observed Canary PCR0/1/2. It must disclose that this
+convenience check does not perform the full X.509 policy validation used by
+`canaryctl`, that expected Canary PCR policy was not independently checked, and that
+the page and JavaScript come from the same origin. It does not replace
+`canaryctl enroll` with operator-supplied Canary PCRs.
+
 History-list fields are unsigned diagnostics. The detail route returns the exact
 signed post-attempt statement and, when the response contained decodable attestation
-document bytes, the exact nonce-bound evidence bundle stored for that attempt. A
-consumer can authenticate and replay those artifacts; transport failures and
-undecodable responses necessarily have no target evidence to replay. Historical
-statement freshness is evaluated at its signed issuance time and must not be
-presented as current freshness.
+document bytes, the exact nonce-bound evidence bundle stored for that attempt.
+Authenticated observed/expected PCR claims are returned by the sibling
+`/evidence/claims` route when verification produced them; they never modify the raw
+evidence bundle or its historical replay envelope. A consumer can authenticate and
+replay those artifacts; transport failures and undecodable responses necessarily
+have no target evidence to replay. Historical statement freshness is evaluated at
+its signed issuance time and must not be presented as current freshness.
 
 ## 14. StageX build and Caution deployment
 

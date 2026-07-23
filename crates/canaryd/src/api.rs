@@ -20,10 +20,11 @@ use axum::{
 };
 use canary_core::{
     canonical::{canonicalize, CanonicalError},
+    evidence::{AuthenticatedPcrClaims, PcrMatches, PcrValues},
     keys::KeysDocument,
     node::ConfigDocument,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -107,7 +108,12 @@ pub fn router(state: ApiState) -> Router {
         .route("/status.json", get(status))
         .route("/targets/{id}/statement", get(statement))
         .route("/targets/{id}/evidence", get(evidence))
+        .route("/targets/{id}/evidence/claims", get(evidence_claims))
         .route("/targets/{id}/history", get(history))
+        .route(
+            "/targets/{id}/history/{attempt_id}/evidence/claims",
+            get(historical_evidence_claims),
+        )
         .route(
             "/targets/{id}/history/{attempt_id}",
             get(historical_attempt),
@@ -196,6 +202,33 @@ async fn evidence(Path(id): Path<String>, State(state): State<ApiState>) -> Resp
     }
 }
 
+/// Serve derived, authenticated measurement claims for the current evidence.
+///
+/// The raw evidence route remains the frozen V0 replay artifact. This route is
+/// deliberately separate: it exposes only claims captured by the verifier
+/// after the AWS chain, COSE signature, and request nonce were checked.
+async fn evidence_claims(Path(id): Path<String>, State(state): State<ApiState>) -> Response {
+    if let Some(response) = not_ready(&state) {
+        return response;
+    }
+    let snapshot = state.snapshot().await;
+    match target(&snapshot, &id) {
+        Some(target) => match &target.evidence {
+            Some(evidence) => json_response(
+                StatusCode::OK,
+                EvidenceClaimsResponse::from((id, evidence, target.evidence_claims.as_ref())),
+            ),
+            None => json_response(
+                StatusCode::NOT_FOUND,
+                ErrorBody {
+                    error: "no_evidence",
+                },
+            ),
+        },
+        None => not_found_response(),
+    }
+}
+
 async fn history(Path(id): Path<String>, State(state): State<ApiState>) -> Response {
     if let Some(response) = not_ready(&state) {
         return response;
@@ -248,6 +281,48 @@ async fn historical_attempt(
                 attempt_id,
                 error = %error,
                 "failed to load historical attempt"
+            );
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorBody {
+                    error: "internal_error",
+                },
+            )
+        }
+    }
+}
+
+async fn historical_evidence_claims(
+    Path((id, attempt_id)): Path<(String, i64)>,
+    State(state): State<ApiState>,
+) -> Response {
+    if let Some(response) = not_ready(&state) {
+        return response;
+    }
+    let snapshot = state.snapshot().await;
+    if target(&snapshot, &id).is_none() {
+        return not_found_response();
+    }
+    match state.store.historical_attempt(&id, attempt_id).await {
+        Ok(Some(attempt)) => match attempt.evidence.as_ref() {
+            Some(evidence) => json_response(
+                StatusCode::OK,
+                EvidenceClaimsResponse::from((id, evidence, attempt.evidence_claims.as_ref())),
+            ),
+            None => json_response(
+                StatusCode::NOT_FOUND,
+                ErrorBody {
+                    error: "no_evidence",
+                },
+            ),
+        },
+        Ok(None) => not_found_response(),
+        Err(error) => {
+            tracing::error!(
+                target_id = %id,
+                attempt_id,
+                error = %error,
+                "failed to load historical evidence claims"
             );
             json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -399,6 +474,138 @@ struct HistoryResponse {
     observations: Vec<HistoryEntry>,
 }
 
+/// Versioned derived view of the currently retained evidence bundle.
+///
+/// `observed_pcrs` and `pcr_matches` are absent unless the evidence verifier
+/// authenticated the AWS certificate chain, COSE signature, and nonce. The
+/// expected values are those used by that same verification, never values
+/// decoded from the unsigned Bootproof manifest.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceClaimsResponse {
+    version: u8,
+    target_id: String,
+    evidence_digest: String,
+    authentication: EvidenceAuthentication,
+    observed_pcrs: Option<PcrValuesResponse>,
+    expected_pcrs: Option<PcrValuesResponse>,
+    pcr_matches: Option<PcrMatchesResponse>,
+}
+
+impl
+    From<(
+        String,
+        &canary_core::evidence::EvidenceBundle,
+        Option<&AuthenticatedPcrClaims>,
+    )> for EvidenceClaimsResponse
+{
+    fn from(
+        (target_id, evidence, claims): (
+            String,
+            &canary_core::evidence::EvidenceBundle,
+            Option<&AuthenticatedPcrClaims>,
+        ),
+    ) -> Self {
+        let (authentication, observed_pcrs, expected_pcrs, pcr_matches) = match claims {
+            Some(claims) => (
+                EvidenceAuthentication {
+                    status: EvidenceAuthenticationStatus::Verified,
+                    nonce_status: NonceAuthenticationStatus::Verified,
+                },
+                Some(PcrValuesResponse::from(&claims.observed)),
+                Some(PcrValuesResponse::from(&claims.expected)),
+                Some(PcrMatchesResponse::from(&claims.matches)),
+            ),
+            None => (
+                EvidenceAuthentication {
+                    status: EvidenceAuthenticationStatus::Unavailable,
+                    nonce_status: NonceAuthenticationStatus::Unavailable,
+                },
+                None,
+                None,
+                None,
+            ),
+        };
+        Self {
+            version: 1,
+            target_id,
+            evidence_digest: evidence.evidence_digest.clone(),
+            authentication,
+            observed_pcrs,
+            expected_pcrs,
+            pcr_matches,
+        }
+    }
+}
+
+/// Authentication applies to the evidence document, not to the server that
+/// happens to serve this JSON response.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceAuthentication {
+    /// AWS chain and COSE signature verification status.
+    status: EvidenceAuthenticationStatus,
+    /// Whether the attestation's nonce matched the Canary probe nonce.
+    nonce_status: NonceAuthenticationStatus,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvidenceAuthenticationStatus {
+    Verified,
+    Unavailable,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NonceAuthenticationStatus {
+    Verified,
+    Unavailable,
+}
+
+/// PCRs rendered with their Nitro index as the JSON key.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PcrValuesResponse {
+    #[serde(rename = "0")]
+    pcr0: String,
+    #[serde(rename = "1")]
+    pcr1: String,
+    #[serde(rename = "2")]
+    pcr2: String,
+}
+
+impl From<&PcrValues> for PcrValuesResponse {
+    fn from(values: &PcrValues) -> Self {
+        Self {
+            pcr0: values.pcr0.clone(),
+            pcr1: values.pcr1.clone(),
+            pcr2: values.pcr2.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PcrMatchesResponse {
+    #[serde(rename = "0")]
+    pcr0: bool,
+    #[serde(rename = "1")]
+    pcr1: bool,
+    #[serde(rename = "2")]
+    pcr2: bool,
+}
+
+impl From<&PcrMatches> for PcrMatchesResponse {
+    fn from(matches: &PcrMatches) -> Self {
+        Self {
+            pcr0: matches.pcr0,
+            pcr1: matches.pcr1,
+            pcr2: matches.pcr2,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -409,7 +616,7 @@ mod tests {
     };
     use canary_core::{
         config::{Config, ExpectedPcrs, Target},
-        evidence::EvidenceBundle,
+        evidence::{AuthenticatedPcrClaims, EvidenceBundle, PcrMatches, PcrValues},
         keys::{KeyEntry, KeysDocument},
         node::ConfigDocument,
         statement::{Payload, Signature, Signer, Statement, Status},
@@ -523,6 +730,27 @@ mod tests {
             transport_warning: None,
             statement: statement(Status::Verified),
             evidence,
+            evidence_claims: None,
+        }
+    }
+
+    fn claims() -> AuthenticatedPcrClaims {
+        AuthenticatedPcrClaims {
+            observed: PcrValues {
+                pcr0: "1".repeat(96),
+                pcr1: "2".repeat(96),
+                pcr2: "3".repeat(96),
+            },
+            expected: PcrValues {
+                pcr0: "1".repeat(96),
+                pcr1: "b".repeat(96),
+                pcr2: "3".repeat(96),
+            },
+            matches: PcrMatches {
+                pcr0: true,
+                pcr1: false,
+                pcr2: true,
+            },
         }
     }
 
@@ -618,9 +846,29 @@ mod tests {
 
         let (status, _, body) = response(router(state.clone()), "/targets/target-a/evidence").await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::to_vec(&evidence()).unwrap());
         assert_eq!(
             serde_json::from_slice::<EvidenceBundle>(&body).unwrap(),
             evidence()
+        );
+
+        let (status, _, body) =
+            response(router(state.clone()), "/targets/target-a/evidence/claims").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({
+                "version": 1,
+                "target_id": "target-a",
+                "evidence_digest": digest('b'),
+                "authentication": {
+                    "status": "unavailable",
+                    "nonce_status": "unavailable"
+                },
+                "observed_pcrs": null,
+                "expected_pcrs": null,
+                "pcr_matches": null
+            })
         );
 
         let (status, _, body) = response(router(state.clone()), "/config.json").await;
@@ -643,12 +891,20 @@ mod tests {
         );
         let script = String::from_utf8(body).unwrap();
         assert!(script.contains("canaryctl enroll"));
+        assert!(script.contains("then writes the authenticated keys"));
+        assert!(script.contains("--keys canary-keys.json"));
         assert!(script.contains("canaryctl verify"));
         assert!(script.contains("--deployment"));
         assert!(script.contains("--attempt"));
         assert!(script.contains("--pcrs"));
         assert!(script.contains("--insecure"));
         assert!(script.contains("isNitroEnclave"));
+        assert!(script.contains("browserVerifyNitro"));
+        assert!(script.contains("fetch(\"/attestation\""));
+        assert!(script.contains("requestJson(deploymentPath(\"evidence/claims\"))"));
+        assert!(script.contains("Observed PCRs came from evidence"));
+        assert!(script.contains("historyClaimsAttempt"));
+        assert!(script.contains("history/${attemptId}/evidence/claims"));
         assert!(!script.contains("window.location.protocol"));
         assert!(script.contains("requestJson(deploymentPath(\"history\"))"));
         assert!(!script.contains("\\n+  --"));
@@ -660,11 +916,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evidence_claims_exposes_only_authenticated_measurements() {
+        let state = state(true).await;
+        let mut target = target(Some(evidence()));
+        target.evidence_claims = Some(claims());
+        state.publish(snapshot(target)).await;
+        state.set_ready(true);
+
+        let (status, headers, body) =
+            response(router(state), "/targets/target-a/evidence/claims").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({
+                "version": 1,
+                "target_id": "target-a",
+                "evidence_digest": digest('b'),
+                "authentication": {
+                    "status": "verified",
+                    "nonce_status": "verified"
+                },
+                "observed_pcrs": {
+                    "0": "1".repeat(96),
+                    "1": "2".repeat(96),
+                    "2": "3".repeat(96)
+                },
+                "expected_pcrs": {
+                    "0": "1".repeat(96),
+                    "1": "b".repeat(96),
+                    "2": "3".repeat(96)
+                },
+                "pcr_matches": {
+                    "0": true,
+                    "1": false,
+                    "2": true
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn evidence_unknown_and_forbidden_routes_are_bounded() {
         let state = state(false).await;
         state.set_ready(true);
         let (status, headers, body) =
             response(router(state.clone()), "/targets/target-a/evidence").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(body, br#"{"error":"no_evidence"}"#);
+
+        let (status, headers, body) =
+            response(router(state.clone()), "/targets/target-a/evidence/claims").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(headers[header::CACHE_CONTROL], "no-store");
         assert_eq!(body, br#"{"error":"no_evidence"}"#);
@@ -718,6 +1021,7 @@ mod tests {
                     attempt_reason: "ALL_CHECKS_PASSED".to_owned(),
                     attempt_observed_at: Some(at(second)),
                     attempt_evidence: Some(evidence()),
+                    attempt_evidence_claims: None,
                     attempt_transport_warning: None,
                     latency_ms: Some(1),
                     config_digest: config().config_digest,
@@ -753,6 +1057,7 @@ mod tests {
                 attempt_reason: "INVALID_SIGNATURE".to_owned(),
                 attempt_observed_at: Some(at(0)),
                 attempt_evidence: Some(exact_evidence.clone()),
+                attempt_evidence_claims: None,
                 attempt_transport_warning: None,
                 latency_ms: Some(1),
                 config_digest: config().config_digest,
@@ -774,10 +1079,60 @@ mod tests {
             serde_json::from_value::<EvidenceBundle>(value["evidence"].clone()).unwrap(),
             exact_evidence
         );
+        assert!(value.get("evidence_claims").is_none());
 
         let (status, _, body) = response(router(state), "/targets/target-a/history/999999").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body, br#"{"error":"not_found"}"#);
+    }
+
+    #[tokio::test]
+    async fn historical_attempt_retains_authenticated_pcr_claims_separately() {
+        let state = state(true).await;
+        let exact_evidence = evidence();
+        let mut exact_claims = claims();
+        exact_claims.expected.pcr1 = exact_claims.observed.pcr1.clone();
+        exact_claims.matches.pcr1 = true;
+        let mut exact_target = target(Some(exact_evidence.clone()));
+        exact_target.evidence_claims = Some(exact_claims.clone());
+        let receipt = state
+            .store
+            .commit(AttemptWrite {
+                target: exact_target,
+                attempted_at: at(0),
+                attempt_reason: "ALL_CHECKS_PASSED".to_owned(),
+                attempt_observed_at: Some(at(0)),
+                attempt_evidence: Some(exact_evidence),
+                attempt_evidence_claims: Some(exact_claims.clone()),
+                attempt_transport_warning: None,
+                latency_ms: Some(1),
+                config_digest: config().config_digest,
+            })
+            .await
+            .unwrap();
+        state.set_ready(true);
+
+        let replay_uri = format!("/targets/target-a/history/{}", receipt.attempt_id);
+        let claims_uri = format!(
+            "/targets/target-a/history/{}/evidence/claims",
+            receipt.attempt_id
+        );
+        let app = router(state);
+        let (status, _, body) = response(app.clone(), &replay_uri).await;
+        assert_eq!(status, StatusCode::OK);
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert!(value.get("evidence_claims").is_none());
+        assert_eq!(
+            serde_json::from_value::<EvidenceBundle>(value["evidence"].clone()).unwrap(),
+            evidence()
+        );
+
+        let (status, _, body) = response(app, &claims_uri).await;
+        assert_eq!(status, StatusCode::OK);
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["observed_pcrs"]["0"], exact_claims.observed.pcr0);
+        assert_eq!(value["expected_pcrs"]["1"], exact_claims.expected.pcr1);
+        assert_eq!(value["pcr_matches"]["1"], exact_claims.matches.pcr1);
     }
 
     #[tokio::test]
@@ -828,9 +1183,12 @@ mod tests {
         assert!(!page.contains("data-tab=\"evidence\""));
         assert!(page.contains("canaryctl verify"));
         assert!(page.contains("canaryctl enroll"));
+        assert!(page.contains("saves the observed TOFU keys"));
+        assert!(page.contains("--keys canary-keys.json"));
         assert!(page.contains("data-runtime-environment=\"non_enclave\""));
         assert!(page.contains("data-identity-mode=\"stable\""));
         assert!(page.contains("id=\"self-check-heading\""));
+        assert!(!page.contains("data-browser-attestation-state=\"checking\""));
         assert!(page.contains("LOCAL RUNTIME"));
         assert!(page.contains("Non-enclave runtime"));
         assert!(page.contains("External verification required"));
@@ -862,7 +1220,16 @@ mod tests {
         assert!(page.contains("data-runtime-environment=\"nitro_enclave\""));
         assert!(page.contains("NSM DETECTED"));
         assert!(page.contains("Nitro enclave detected"));
+        assert!(page.contains("data-browser-attestation-state=\"checking\""));
+        assert!(page.contains("Browser attestation check"));
+        assert!(page.contains("PCR0 · image"));
+        assert!(page.contains("same-origin browser check"));
+        assert!(page.contains("does not perform full X.509 policy validation"));
+        assert!(page.contains("Authenticated Nitro measurements"));
+        assert!(page.contains("Decoded claims JSON"));
         assert!(page.contains("ATTESTED:"));
+        assert!(page.contains("writes <code>canary-keys.json</code> only after"));
+        assert!(page.contains("then writes the authenticated keys"));
         assert!(page.contains("caution verify --save-pcrs"));
         assert!(page.contains("--pcrs .caution/trusted_hashes.json"));
         assert!(!page.contains("No Nitro device is visible"));

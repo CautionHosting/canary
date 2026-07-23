@@ -343,7 +343,8 @@ impl Runtime {
                 ),
             )
             .await?;
-            let snapshot = snapshot_from_statement(target, origin.clone(), statement, None, None)?;
+            let snapshot =
+                snapshot_from_statement(target, origin.clone(), statement, None, None, None)?;
             store
                 .publish_current(CurrentWrite {
                     target: snapshot.clone(),
@@ -712,6 +713,11 @@ impl Runtime {
                 } else {
                     None
                 },
+                if attempt.classification == ProbeClassification::Definitive {
+                    attempt.evidence_claims.clone()
+                } else {
+                    None
+                },
                 derived
                     .transport_warning
                     .map(|warning| warning.as_str().to_owned()),
@@ -725,6 +731,7 @@ impl Runtime {
                 attempt_reason: reason.as_str().to_owned(),
                 attempt_observed_at: attempt.observed_at.map(canonical_second),
                 attempt_evidence: attempt.evidence,
+                attempt_evidence_claims: attempt.evidence_claims,
                 attempt_transport_warning: if attempt.classification
                     == ProbeClassification::Transport
                 {
@@ -771,6 +778,7 @@ impl Runtime {
                 &managed.target,
                 managed.origin.clone(),
                 statement,
+                None,
                 None,
                 None,
             )?;
@@ -925,6 +933,7 @@ fn snapshot_from_statement(
     origin: String,
     statement: Statement,
     evidence: Option<canary_core::evidence::EvidenceBundle>,
+    evidence_claims: Option<canary_core::evidence::AuthenticatedPcrClaims>,
     transport_warning: Option<String>,
 ) -> Result<TargetSnapshot, RuntimeError> {
     let payload = &statement.payload;
@@ -947,6 +956,7 @@ fn snapshot_from_statement(
         transport_warning,
         statement,
         evidence,
+        evidence_claims,
     })
 }
 
@@ -1057,6 +1067,7 @@ mod tests {
                 classification: ProbeClassification::Transport,
                 reason: ProbeReason::Timeout,
                 evidence: None,
+                evidence_claims: None,
                 evidence_digest: None,
                 manifest_digest: None,
             }
@@ -1077,6 +1088,7 @@ mod tests {
                 classification: ProbeClassification::Transport,
                 reason: ProbeReason::Timeout,
                 evidence: None,
+                evidence_claims: None,
                 evidence_digest: None,
                 manifest_digest: None,
             }
@@ -1097,6 +1109,7 @@ mod tests {
                 classification: ProbeClassification::Definitive,
                 reason: ProbeReason::AllChecksPassed,
                 evidence: None,
+                evidence_claims: None,
                 evidence_digest: None,
                 manifest_digest: None,
             }
@@ -1138,6 +1151,7 @@ mod tests {
             classification: ProbeClassification::Transport,
             reason,
             evidence: None,
+            evidence_claims: None,
             evidence_digest: None,
             manifest_digest: None,
         }
@@ -1164,6 +1178,7 @@ mod tests {
             classification: ProbeClassification::Definitive,
             reason: ProbeReason::AllChecksPassed,
             evidence: Some(evidence),
+            evidence_claims: None,
             evidence_digest: Some(evidence_digest),
             manifest_digest: Some(format!("sha256:{}", "b".repeat(64))),
         }

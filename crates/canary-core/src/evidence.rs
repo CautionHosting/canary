@@ -17,6 +17,7 @@ use base64::Engine as _;
 use bootproof_sdk::format::nitro::{Nitro, NitroPcrs};
 use bootproof_sdk::VerifiableSignedAttestationFormat;
 use chrono::{DateTime, SecondsFormat, Utc};
+use coset::{CborSerializable, CoseSign1};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -239,6 +240,44 @@ pub struct EvidenceOutcome {
     /// only on a passing verification (spec §7.3). `None` on failure or if
     /// absent.
     pub user_data: Option<Vec<u8>>,
+    /// PCR0/1/2 extracted from a payload only after its AWS certificate chain,
+    /// COSE signature, and caller-supplied nonce have all been verified.
+    ///
+    /// This remains available on an authenticated PCR policy mismatch so
+    /// callers can safely show the actual measurement alongside policy.
+    pub pcr_claims: Option<AuthenticatedPcrClaims>,
+}
+
+/// The three meaningful Nitro PCR values represented as lowercase hex.
+///
+/// These are a diagnostic representation only; `NitroPcrs` remains the
+/// verifier's byte-oriented input type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PcrValues {
+    pub pcr0: String,
+    pub pcr1: String,
+    pub pcr2: String,
+}
+
+/// Per-PCR comparison of authenticated measurements against Canary policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PcrMatches {
+    pub pcr0: bool,
+    pub pcr1: bool,
+    pub pcr2: bool,
+}
+
+/// Authenticated observed PCRs and the policy used to evaluate them.
+///
+/// A value of this type is only produced after `bootproof-sdk` has validated
+/// the AWS certificate chain, COSE signature, and supplied nonce against the
+/// same observed PCR values. It therefore never represents merely decoded,
+/// unauthenticated CBOR.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthenticatedPcrClaims {
+    pub observed: PcrValues,
+    pub expected: PcrValues,
+    pub matches: PcrMatches,
 }
 
 /// SHA-256 digest of `bytes`, formatted as `sha256:<64 lowercase hex chars>`.
@@ -287,6 +326,82 @@ fn extract_user_data(payload: &serde_cbor::Value) -> Option<Vec<u8>> {
     }
 }
 
+/// Extract PCR0/1/2 from a Nitro payload. Callers must not treat the result
+/// as authenticated until `Nitro::verify` has succeeded: this function is
+/// also used to obtain candidate PCRs with which to drive that verification.
+fn extract_pcrs(payload: &serde_cbor::Value) -> Option<NitroPcrs> {
+    let serde_cbor::Value::Map(map) = payload else {
+        return None;
+    };
+    let serde_cbor::Value::Map(pcrs) = map.get(&serde_cbor::Value::Text("pcrs".to_string()))?
+    else {
+        return None;
+    };
+
+    let mut result = NitroPcrs::new();
+    for index in [0u8, 1, 2] {
+        let serde_cbor::Value::Bytes(value) =
+            pcrs.get(&serde_cbor::Value::Integer(i128::from(index)))?
+        else {
+            return None;
+        };
+        if value.is_empty() {
+            return None;
+        }
+        result.insert(index, value.clone());
+    }
+    Some(result)
+}
+
+/// Decode just enough untrusted COSE/CBOR to learn the PCR candidates used
+/// for verification. The returned values are deliberately not exposed: they
+/// become authenticated only when a subsequent `Nitro::verify` succeeds
+/// against these exact candidates.
+fn extract_candidate_pcrs(document_bytes: &[u8]) -> Option<NitroPcrs> {
+    let cose = CoseSign1::from_slice(document_bytes).ok()?;
+    let payload = cose.payload?;
+    let payload: serde_cbor::Value = serde_cbor::from_slice(&payload).ok()?;
+    extract_pcrs(&payload)
+}
+
+fn pcr_values(pcrs: &NitroPcrs) -> Option<PcrValues> {
+    Some(PcrValues {
+        pcr0: hex::encode(pcrs.get(&0)?),
+        pcr1: hex::encode(pcrs.get(&1)?),
+        pcr2: hex::encode(pcrs.get(&2)?),
+    })
+}
+
+fn pcr_matches(observed: &NitroPcrs, expected: &NitroPcrs) -> Option<PcrMatches> {
+    Some(PcrMatches {
+        pcr0: observed.get(&0)? == expected.get(&0)?,
+        pcr1: observed.get(&1)? == expected.get(&1)?,
+        pcr2: observed.get(&2)? == expected.get(&2)?,
+    })
+}
+
+fn authenticated_pcr_claims(
+    verified_payload: &serde_cbor::Value,
+    expected_pcrs: &NitroPcrs,
+) -> Option<AuthenticatedPcrClaims> {
+    let observed = extract_pcrs(verified_payload)?;
+    Some(AuthenticatedPcrClaims {
+        observed: pcr_values(&observed)?,
+        expected: pcr_values(expected_pcrs)?,
+        matches: pcr_matches(&observed, expected_pcrs)?,
+    })
+}
+
+fn observed_pcrs_are_zero(claims: &AuthenticatedPcrClaims) -> bool {
+    [
+        &claims.observed.pcr0,
+        &claims.observed.pcr1,
+        &claims.observed.pcr2,
+    ]
+    .iter()
+    .any(|value| value.bytes().all(|byte| byte == b'0'))
+}
+
 /// Map a `bootproof-sdk` verification error to the closest stable
 /// [`ProbeReason`] (spec §10).
 ///
@@ -326,6 +441,12 @@ fn map_verify_error(err: &bootproof_sdk::format::Error) -> ProbeReason {
 /// verifier side of `bootproof-sdk`, equivalent to
 /// `Nitro::new(document, expected_pcrs).verify(now, nonce)`."
 ///
+/// It first extracts PCR0/1/2 as untrusted candidates, then asks
+/// `bootproof-sdk` to authenticate the document using those exact values.
+/// The caller's PCR policy is applied only after certificate-chain,
+/// COSE-signature, and nonce verification succeed. This safely preserves
+/// observed measurements for a `PCR_MISMATCH` diagnostic.
+///
 /// Never panics: all `bootproof-sdk` errors and malformed input are captured
 /// in the returned [`EvidenceOutcome`].
 pub fn verify_evidence(
@@ -342,10 +463,24 @@ pub fn verify_evidence(
             reason: ProbeReason::DebugOrZeroPcr,
             evidence_digest,
             user_data: None,
+            pcr_claims: None,
         };
     }
 
-    let nitro = match Nitro::new(document_bytes.to_vec(), expected_pcrs.clone()) {
+    let candidate_pcrs = match extract_candidate_pcrs(document_bytes) {
+        Some(pcrs) => pcrs,
+        None => {
+            return EvidenceOutcome {
+                passed: false,
+                reason: ProbeReason::MalformedEvidence,
+                evidence_digest,
+                user_data: None,
+                pcr_claims: None,
+            };
+        }
+    };
+
+    let nitro = match Nitro::new(document_bytes.to_vec(), candidate_pcrs) {
         Ok(nitro) => nitro,
         Err(err) => {
             return EvidenceOutcome {
@@ -353,22 +488,56 @@ pub fn verify_evidence(
                 reason: map_verify_error(&err),
                 evidence_digest,
                 user_data: None,
+                pcr_claims: None,
             };
         }
     };
 
     match nitro.verify(now, &nonce) {
-        Ok(payload) => EvidenceOutcome {
-            passed: true,
-            reason: ProbeReason::AllChecksPassed,
-            evidence_digest,
-            user_data: extract_user_data(&payload),
+        Ok(payload) => match authenticated_pcr_claims(&payload, expected_pcrs) {
+            Some(pcr_claims) if observed_pcrs_are_zero(&pcr_claims) => EvidenceOutcome {
+                passed: false,
+                reason: ProbeReason::DebugOrZeroPcr,
+                evidence_digest,
+                user_data: None,
+                pcr_claims: Some(pcr_claims),
+            },
+            Some(pcr_claims)
+                if !pcr_claims.matches.pcr0
+                    || !pcr_claims.matches.pcr1
+                    || !pcr_claims.matches.pcr2 =>
+            {
+                EvidenceOutcome {
+                    passed: false,
+                    reason: ProbeReason::PcrMismatch,
+                    evidence_digest,
+                    user_data: None,
+                    pcr_claims: Some(pcr_claims),
+                }
+            }
+            Some(pcr_claims) => EvidenceOutcome {
+                passed: true,
+                reason: ProbeReason::AllChecksPassed,
+                evidence_digest,
+                user_data: extract_user_data(&payload),
+                pcr_claims: Some(pcr_claims),
+            },
+            // `Nitro::verify` already required PCR0/1/2 from this payload,
+            // so this is defensive against an SDK contract change.
+            None => EvidenceOutcome {
+                passed: false,
+                reason: ProbeReason::InternalError,
+                evidence_digest,
+                user_data: None,
+                pcr_claims: None,
+            },
         },
         Err(err) => EvidenceOutcome {
             passed: false,
             reason: map_verify_error(&err),
             evidence_digest,
             user_data: None,
+            pcr_claims: None,
         },
     }
 }
@@ -460,6 +629,26 @@ mod tests {
             outcome.evidence_digest,
             "sha256:6afe913ae239fc83c44fd21c367f6ca9bf1b1b31d737c4720fd42cd49deb2c47"
         );
+        assert_eq!(
+            outcome.pcr_claims,
+            Some(AuthenticatedPcrClaims {
+                observed: PcrValues {
+                    pcr0: PCR_0_AND_1.to_string(),
+                    pcr1: PCR_0_AND_1.to_string(),
+                    pcr2: PCR_2.to_string(),
+                },
+                expected: PcrValues {
+                    pcr0: PCR_0_AND_1.to_string(),
+                    pcr1: PCR_0_AND_1.to_string(),
+                    pcr2: PCR_2.to_string(),
+                },
+                matches: PcrMatches {
+                    pcr0: true,
+                    pcr1: true,
+                    pcr2: true,
+                },
+            })
+        );
     }
 
     #[test]
@@ -481,6 +670,19 @@ mod tests {
 
         assert!(!outcome.passed);
         assert_eq!(outcome.reason, ProbeReason::PcrMismatch);
+        let claims = outcome
+            .pcr_claims
+            .expect("authenticated PCR claims remain available on mismatch");
+        assert_eq!(claims.observed.pcr0, PCR_0_AND_1);
+        assert_eq!(claims.expected.pcr0, hex::encode(pcrs.get(&0).unwrap()));
+        assert_eq!(
+            claims.matches,
+            PcrMatches {
+                pcr0: false,
+                pcr1: true,
+                pcr2: true,
+            }
+        );
     }
 
     #[test]
@@ -492,6 +694,7 @@ mod tests {
 
         assert!(!outcome.passed);
         assert_eq!(outcome.reason, ProbeReason::InvalidSignature);
+        assert!(outcome.pcr_claims.is_none());
     }
 
     #[test]

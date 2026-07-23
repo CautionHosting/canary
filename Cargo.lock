@@ -275,6 +275,7 @@ dependencies = [
  "base64",
  "bootproof-sdk",
  "chrono",
+ "coset",
  "ed25519-dalek",
  "fips204",
  "hex",

@@ -11,7 +11,8 @@ use base64::Engine as _;
 use canary_core::canonical::digest_canonical;
 use canary_core::config::Target;
 use canary_core::evidence::{
-    evidence_digest, pcrs_from_hex, verify_evidence, EvidenceBundle, ProbeReason, EVIDENCE_PROTOCOL,
+    evidence_digest, pcrs_from_hex, verify_evidence, AuthenticatedPcrClaims, EvidenceBundle,
+    ProbeReason, EVIDENCE_PROTOCOL,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use rand::RngCore;
@@ -46,6 +47,7 @@ pub struct ProbeAttempt {
     pub classification: ProbeClassification,
     pub reason: ProbeReason,
     pub evidence: Option<EvidenceBundle>,
+    pub evidence_claims: Option<AuthenticatedPcrClaims>,
     pub evidence_digest: Option<String>,
     pub manifest_digest: Option<String>,
 }
@@ -67,6 +69,7 @@ impl ProbeAttempt {
             classification: ProbeClassification::Transport,
             reason,
             evidence: None,
+            evidence_claims: None,
             evidence_digest: None,
             manifest_digest: None,
         }
@@ -79,6 +82,7 @@ impl ProbeAttempt {
         latency: Duration,
         reason: ProbeReason,
         evidence: EvidenceBundle,
+        evidence_claims: Option<AuthenticatedPcrClaims>,
     ) -> Self {
         Self {
             target_id: target_id.to_owned(),
@@ -91,6 +95,7 @@ impl ProbeAttempt {
             evidence_digest: Some(evidence.evidence_digest.clone()),
             manifest_digest: Some(evidence.manifest_digest.clone()),
             evidence: Some(evidence),
+            evidence_claims,
         }
     }
 
@@ -111,6 +116,7 @@ impl ProbeAttempt {
             classification: ProbeClassification::Definitive,
             reason: ProbeReason::MalformedEvidence,
             evidence: None,
+            evidence_claims: None,
             evidence_digest: None,
             manifest_digest: None,
         }
@@ -138,6 +144,7 @@ impl ProbeAttempt {
             classification: ProbeClassification::Definitive,
             reason,
             evidence: None,
+            evidence_claims: None,
             evidence_digest: None,
             manifest_digest: None,
         }
@@ -407,6 +414,7 @@ async fn probe_with_nonce_inner<R: Resolver, T: ProbeTransport>(
                 latency,
                 ProbeReason::InternalError,
                 evidence,
+                None,
             );
         }
     };
@@ -423,6 +431,7 @@ async fn probe_with_nonce_inner<R: Resolver, T: ProbeTransport>(
         latency,
         verification.reason,
         evidence,
+        verification.pcr_claims,
     )
 }
 

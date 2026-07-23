@@ -143,6 +143,9 @@ canaryctl verify \
   --keys canary-keys.json
 ```
 
+`enroll` writes `canary-keys.json` only after the fresh Canary attestation, expected
+PCR0/1/2, and attested config/key binding verify successfully.
+
 Keep `canary-keys.json` as an integrity-critical public trust file. Enrollment never
 overwrites it. Select specific deployments with repeated `--deployment payments-prod`.
 
@@ -210,8 +213,11 @@ and `watcher.heartbeat`.
 
 Open `https://canary.example.com/` (or `http://localhost:8080/` locally) for current
 status. Each deployment has a compact overview and history view with ready-to-copy
-local `canaryctl verify` commands. Statement, evidence, and history JSON remain
-available as secondary inspection artifacts.
+local `canaryctl verify` commands. Its inspector shows authenticated observed
+PCR0/1/2 beside the configured expected values and their match result; retained
+history rows can expand the same measurements for that exact attempt. Statement, raw
+evidence, decoded claims, and history JSON remain available as secondary inspection
+artifacts.
 
 ![Canary status dashboard](readme_images/canaryd.png)
 
@@ -219,10 +225,14 @@ available as secondary inspection artifacts.
 
 ![Deployment history view](readme_images/history-demo.png)
 
-The home-page self-check reports whether `/dev/nsm` is visible, scheduler readiness,
-identity lifecycle, and the running binary/config digests. That environment result is
-a self-reported runtime hint, not remote proof. Run `canaryctl` with your own PCR and
-key inputs to verify fresh Canary attestation and its config/key bindings externally.
+For a reported Nitro runtime, the home-page self-check also generates a fresh browser
+nonce, uses WebCrypto to check certificate signatures to the pinned AWS Nitro root,
+certificate dates, COSE ES384 and nonce binding, then displays the authenticated
+observed Canary PCR0/1/2. This convenience check does not implement the full X.509
+policy validation used by `canaryctl` and does not compare independently supplied
+expected Canary PCR policy. The `/dev/nsm` result remains self-reported, and the
+page's JavaScript comes from the same origin. Run `canaryctl enroll` with your own PCR
+input for the full independent Canary PCR, config and key-binding check.
 
 ## Advanced checks
 

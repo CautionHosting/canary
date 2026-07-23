@@ -204,6 +204,7 @@ impl ProbeRunner for BlockingRunner {
             classification: ProbeClassification::Transport,
             reason: canary_core::evidence::ProbeReason::Timeout,
             evidence: None,
+            evidence_claims: None,
             evidence_digest: None,
             manifest_digest: None,
         }
@@ -451,6 +452,14 @@ async fn verified_fixture_is_parsed_verified_signed_and_served_with_linked_raw_e
         evidence.nonce,
         STANDARD.encode(hex::decode(FIXTURE_NONCE_HEX).unwrap())
     );
+    let claims = target
+        .evidence_claims
+        .as_ref()
+        .expect("verified result retains authenticated PCR claims");
+    assert_eq!(claims.observed.pcr0, FIXTURE_PCR_0_AND_1);
+    assert_eq!(claims.observed.pcr1, FIXTURE_PCR_0_AND_1);
+    assert_eq!(claims.observed.pcr2, FIXTURE_PCR_2);
+    assert!(claims.matches.pcr0 && claims.matches.pcr1 && claims.matches.pcr2);
     let decoded = evidence.decode_and_validate().unwrap();
     let outcome = verify_evidence(
         &decoded.document,
@@ -478,12 +487,23 @@ async fn verified_fixture_is_parsed_verified_signed_and_served_with_linked_raw_e
     );
     assert_eq!(statement.payload.issued_at, fixed_timestamp);
     verify_statement(&statement, &ed_key, &ml_key, fixed_time).unwrap();
-    let (status, _, evidence_response) = request(app, "/targets/aws-test/evidence").await;
+    let (status, _, evidence_response) = request(app.clone(), "/targets/aws-test/evidence").await;
     assert_eq!(status, StatusCode::OK);
     let served_evidence: serde_json::Value = serde_json::from_slice(&evidence_response).unwrap();
     assert_eq!(served_evidence["evidence_digest"], evidence.evidence_digest);
     assert_eq!(served_evidence["document"], evidence.document);
     assert_eq!(served_evidence["nonce"], evidence.nonce);
+    let (status, _, claims_response) = request(app, "/targets/aws-test/evidence/claims").await;
+    assert_eq!(status, StatusCode::OK);
+    let served_claims: serde_json::Value = serde_json::from_slice(&claims_response).unwrap();
+    assert_eq!(served_claims["authentication"]["status"], "verified");
+    assert_eq!(served_claims["authentication"]["nonce_status"], "verified");
+    assert_eq!(served_claims["observed_pcrs"]["0"], FIXTURE_PCR_0_AND_1);
+    assert_eq!(served_claims["observed_pcrs"]["1"], FIXTURE_PCR_0_AND_1);
+    assert_eq!(served_claims["observed_pcrs"]["2"], FIXTURE_PCR_2);
+    assert_eq!(served_claims["pcr_matches"]["0"], true);
+    assert_eq!(served_claims["pcr_matches"]["1"], true);
+    assert_eq!(served_claims["pcr_matches"]["2"], true);
 
     cancellation.cancel();
     tokio::time::timeout(Duration::from_secs(2), worker)

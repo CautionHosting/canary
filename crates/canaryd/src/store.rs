@@ -170,6 +170,15 @@ impl Store {
             .attempt_evidence
             .as_ref()
             .map(|evidence| evidence.manifest_digest.as_str());
+        let attempt_evidence_claims_json = attempt
+            .attempt_evidence_claims
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|source| StoreError::Serialize {
+                field: "attempt evidence claims",
+                source,
+            })?;
         let attempted_at = timestamp(attempt.attempted_at);
         let attempt_observed_at = attempt.attempt_observed_at.map(timestamp);
 
@@ -177,8 +186,8 @@ impl Store {
         let result = sqlx::query(
             "INSERT INTO attempts \
              (target_id, attempted_at, observed_at, state, reason, attempt_reason, latency_ms, config_digest, \
-              statement_json, evidence_json, evidence_digest, nonce, manifest_digest, transport_warning) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              statement_json, evidence_json, evidence_claims_json, evidence_digest, nonce, manifest_digest, transport_warning) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&attempt.target.id)
         .bind(&attempted_at)
@@ -190,6 +199,7 @@ impl Store {
         .bind(&attempt.config_digest)
         .bind(&current.statement_json)
         .bind(&attempt_evidence_json)
+        .bind(&attempt_evidence_claims_json)
         .bind(attempt_evidence_digest)
         .bind(attempt_nonce)
         .bind(attempt_manifest_digest)
@@ -345,7 +355,7 @@ impl Store {
         let row = sqlx::query(
             "SELECT id, target_id, attempted_at, observed_at, state, reason, attempt_reason, latency_ms,
                     evidence_digest, manifest_digest, config_digest, transport_warning,
-                    statement_json, evidence_json
+                    statement_json, evidence_json, evidence_claims_json
              FROM attempts WHERE target_id = ? AND id = ?",
         )
         .bind(target_id)
@@ -538,6 +548,7 @@ fn history_row(row: sqlx::sqlite::SqliteRow) -> Result<HistoryEntry, StoreError>
 fn historical_attempt_row(row: sqlx::sqlite::SqliteRow) -> Result<HistoricalAttempt, StoreError> {
     let statement_json: String = row.try_get("statement_json")?;
     let evidence_json: Option<String> = row.try_get("evidence_json")?;
+    let evidence_claims_json: Option<String> = row.try_get("evidence_claims_json")?;
     let statement =
         serde_json::from_str(&statement_json).map_err(|source| StoreError::Deserialize {
             field: "historical statement",
@@ -551,10 +562,19 @@ fn historical_attempt_row(row: sqlx::sqlite::SqliteRow) -> Result<HistoricalAtte
             })
         })
         .transpose()?;
+    let evidence_claims = evidence_claims_json
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|source| StoreError::Deserialize {
+                field: "historical evidence claims",
+                source,
+            })
+        })
+        .transpose()?;
     Ok(HistoricalAttempt {
         observation: history_row(row)?,
         statement,
         evidence,
+        evidence_claims,
     })
 }
 
@@ -668,6 +688,7 @@ mod tests {
                 transport_warning: (!with_evidence).then(|| "TIMEOUT".to_owned()),
                 statement: stmt,
                 evidence: with_evidence.then(|| evidence(target_id, at(second))),
+                evidence_claims: None,
             },
             attempted_at: at(second),
             attempt_reason: if with_evidence {
@@ -677,6 +698,7 @@ mod tests {
             },
             attempt_observed_at: observed_at,
             attempt_evidence: with_evidence.then(|| evidence(target_id, at(second))),
+            attempt_evidence_claims: None,
             attempt_transport_warning: (!with_evidence).then(|| "TIMEOUT".to_owned()),
             latency_ms: Some(42),
             config_digest:
@@ -697,6 +719,7 @@ mod tests {
                 transport_warning: None,
                 statement: statement(target_id, status, None),
                 evidence: None,
+                evidence_claims: None,
             },
             config_digest:
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),

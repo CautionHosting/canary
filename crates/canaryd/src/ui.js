@@ -1,6 +1,344 @@
 (() => {
   "use strict";
 
+  // Portions below are adapted from attestation-widget and tee-attestation-js.
+  // Copyright (c) 2025 Distrust LLC. Licensed under the MIT License:
+  // https://git.distrust.co/public/attestation-widget
+  // CBOR/COSE and Nitro certificate verification run locally with WebCrypto.
+  // This is deliberately separate from canaryctl's independently supplied
+  // expected-PCR policy verification.
+  const NITRO_ROOT_CERT = `-----BEGIN CERTIFICATE-----
+MIICETCCAZagAwIBAgIRAPkxdWgbkK/hHUbMtOTn+FYwCgYIKoZIzj0EAwMwSTEL
+MAkGA1UEBhMCVVMxDzANBgNVBAoMBkFtYXpvbjEMMAoGA1UECwwDQVdTMRswGQYD
+VQQDDBJhd3Mubml0cm8tZW5jbGF2ZXMwHhcNMTkxMDI4MTMyODA1WhcNNDkxMDI4
+MTQyODA1WjBJMQswCQYDVQQGEwJVUzEPMA0GA1UECgwGQW1hem9uMQwwCgYDVQQL
+DANBV1MxGzAZBgNVBAMMEmF3cy5uaXRyby1lbmNsYXZlczB2MBAGByqGSM49AgEG
+BSuBBAAiA2IABPwCVOumCMHzaHDimtqQvkY4MpJzbolL//Zy2YlES1BR5TSksfbb
+48C8WBoyt7F2Bw7eEtaaP+ohG2bnUs990d0JX28TcPQXCEPZ3BABIeTPYwEoCWZE
+h8l5YoQwTcU/9KNCMEAwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUkCW1DdkF
+R+eWw5b6cp3PmanfS5YwDgYDVR0PAQH/BAQDAgGGMAoGCCqGSM49BAMDA2kAMGYC
+MQCjfy+Rocm9Xue4YnwWmNJVA44fA0P5W2OpYow9OYCVRaEevL8uO1XYru5xtMPW
+rfMCMQCi85sWBbJwKKXdS6BptQFuZbT73o/gBh1qUxl/nNr12UO8Yfwr6wPLb+6N
+IwLz3/Y=
+-----END CERTIFICATE-----`;
+
+  function browserBytesToHex(bytes) {
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  function browserBytesToBase64(bytes) {
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  }
+
+  function browserBase64ToBytes(value) {
+    const binary = atob(value);
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  }
+
+  function browserArraysEqual(left, right) {
+    return left.length === right.length && left.every((value, index) => value === right[index]);
+  }
+
+  function browserDecodeCbor(bytes) {
+    let offset = 0;
+    const decoder = new TextDecoder();
+    const readLength = (additional) => {
+      if (additional < 24) return additional;
+      if (additional === 24) return bytes[offset++];
+      if (additional === 25) return (bytes[offset++] << 8) | bytes[offset++];
+      if (additional === 26) return ((bytes[offset++] << 24) >>> 0) + (bytes[offset++] << 16) + (bytes[offset++] << 8) + bytes[offset++];
+      if (additional === 27) {
+        let value = 0;
+        for (let i = 0; i < 8; i += 1) value = (value * 256) + bytes[offset++];
+        return value;
+      }
+      if (additional === 31) return -1;
+      throw new Error("Unsupported CBOR length");
+    };
+    const read = () => {
+      if (offset >= bytes.length) throw new Error("Truncated CBOR input");
+      const initial = bytes[offset++];
+      const type = initial >> 5;
+      const length = readLength(initial & 31);
+      if (type === 0) return length;
+      if (type === 1) return -1 - length;
+      if (type === 2) {
+        if (length < 0) throw new Error("Indefinite byte strings are unsupported");
+        const value = bytes.slice(offset, offset + length);
+        offset += length;
+        return value;
+      }
+      if (type === 3) {
+        if (length < 0) throw new Error("Indefinite text strings are unsupported");
+        const value = decoder.decode(bytes.slice(offset, offset + length));
+        offset += length;
+        return value;
+      }
+      if (type === 4) {
+        const value = [];
+        if (length < 0) {
+          while (bytes[offset] !== 255) value.push(read());
+          offset += 1;
+        } else {
+          for (let i = 0; i < length; i += 1) value.push(read());
+        }
+        return value;
+      }
+      if (type === 5) {
+        const value = Object.create(null);
+        const pairs = length < 0 ? Infinity : length;
+        for (let i = 0; i < pairs; i += 1) {
+          if (length < 0 && bytes[offset] === 255) {
+            offset += 1;
+            break;
+          }
+          value[read()] = read();
+        }
+        return value;
+      }
+      if (type === 6) return read();
+      if (type === 7 && (initial & 31) === 20) return false;
+      if (type === 7 && (initial & 31) === 21) return true;
+      if (type === 7 && (initial & 31) === 22) return null;
+      throw new Error("Unsupported CBOR value");
+    };
+    const value = read();
+    if (offset !== bytes.length) throw new Error("Unexpected trailing CBOR data");
+    return value;
+  }
+
+  function browserEncodeCbor(value) {
+    const chunks = [];
+    const pushLength = (type, length) => {
+      if (length < 24) chunks.push(Uint8Array.of((type << 5) | length));
+      else if (length < 256) chunks.push(Uint8Array.of((type << 5) | 24, length));
+      else if (length < 65_536) chunks.push(Uint8Array.of((type << 5) | 25, length >> 8, length & 255));
+      else throw new Error("CBOR value is too large");
+    };
+    const push = (item) => {
+      if (typeof item === "string") {
+        const bytes = new TextEncoder().encode(item);
+        pushLength(3, bytes.length);
+        chunks.push(bytes);
+      } else if (item instanceof Uint8Array) {
+        pushLength(2, item.length);
+        chunks.push(item);
+      } else if (Array.isArray(item)) {
+        pushLength(4, item.length);
+        item.forEach(push);
+      } else {
+        throw new Error("Unsupported CBOR signing value");
+      }
+    };
+    push(value);
+    const size = chunks.reduce((total, chunk) => total + chunk.length, 0);
+    const output = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      output.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return output;
+  }
+
+  function browserParseCertificate(der) {
+    let offset = 0;
+    const readByte = () => der[offset++];
+    const readLength = () => {
+      const first = readByte();
+      if (first < 128) return first;
+      const bytes = first & 127;
+      let length = 0;
+      for (let i = 0; i < bytes; i += 1) length = (length << 8) | readByte();
+      return length;
+    };
+    const expectTag = (tag) => {
+      if (readByte() !== tag) throw new Error("Invalid DER certificate");
+      return readLength();
+    };
+    const skip = () => {
+      readByte();
+      const length = readLength();
+      offset += length;
+    };
+    expectTag(48);
+    const tbsStart = offset;
+    const tbsLength = expectTag(48);
+    const tbsEnd = offset + tbsLength;
+    const tbsCertificate = der.slice(tbsStart, tbsEnd);
+    if (der[offset] === 160) {
+      offset += 1;
+      const versionLength = readLength();
+      offset += versionLength;
+    }
+    skip(); // serial number
+    skip(); // signature algorithm
+    skip(); // issuer
+    const validityLength = expectTag(48);
+    const validityEnd = offset + validityLength;
+    readByte();
+    const notBeforeLength = readLength();
+    const notBefore = new TextDecoder().decode(der.slice(offset, offset + notBeforeLength));
+    offset += notBeforeLength;
+    readByte();
+    const notAfterLength = readLength();
+    const notAfter = new TextDecoder().decode(der.slice(offset, offset + notAfterLength));
+    offset += notAfterLength;
+    offset = validityEnd;
+    skip(); // subject
+    const publicKeyStart = offset;
+    const publicKeyLength = expectTag(48);
+    const publicKeyRaw = der.slice(publicKeyStart, offset + publicKeyLength);
+    offset = tbsEnd;
+    skip(); // signature algorithm
+    if (readByte() !== 3) throw new Error("Invalid DER certificate signature");
+    const signatureLength = readLength();
+    if (readByte() !== 0) throw new Error("Invalid DER certificate signature");
+    const signature = der.slice(offset, offset + signatureLength - 1);
+    return { tbsCertificate, signature, publicKeyRaw, notBefore, notAfter };
+  }
+
+  function browserParseAsn1Time(value) {
+    const raw = value.replace("Z", "");
+    const year = raw.length === 12 ? (Number(raw.slice(0, 2)) >= 50 ? 1900 : 2000) + Number(raw.slice(0, 2)) : Number(raw.slice(0, 4));
+    const base = raw.length === 12 ? 2 : 4;
+    return Date.UTC(year, Number(raw.slice(base, base + 2)) - 1, Number(raw.slice(base + 2, base + 4)), Number(raw.slice(base + 4, base + 6)), Number(raw.slice(base + 6, base + 8)), Number(raw.slice(base + 8, base + 10)));
+  }
+
+  function browserEcdsaDerToRaw(der) {
+    let offset = 0;
+    if (der[offset++] !== 48) throw new Error("Invalid ECDSA certificate signature");
+    let sequenceLength = der[offset++];
+    if (sequenceLength & 128) offset += sequenceLength & 127;
+    if (der[offset++] !== 2) throw new Error("Invalid ECDSA certificate signature");
+    let rLength = der[offset++];
+    let rStart = offset;
+    if (der[rStart] === 0) {
+      rStart += 1;
+      rLength -= 1;
+    }
+    const r = der.slice(rStart, rStart + rLength);
+    offset = rStart + rLength;
+    if (der[offset++] !== 2) throw new Error("Invalid ECDSA certificate signature");
+    let sLength = der[offset++];
+    let sStart = offset;
+    if (der[sStart] === 0) {
+      sStart += 1;
+      sLength -= 1;
+    }
+    const s = der.slice(sStart, sStart + sLength);
+    const raw = new Uint8Array(96);
+    raw.set(r, 48 - r.length);
+    raw.set(s, 96 - s.length);
+    return raw;
+  }
+
+  function browserPemToDer(pem) {
+    return browserBase64ToBytes(pem.replace(/-----BEGIN [^-]+-----|-----END [^-]+-----|\s/g, ""));
+  }
+
+  async function browserVerifyCertificateChain(certificates) {
+    if (!Array.isArray(certificates) || certificates.length === 0) throw new Error("Missing AWS Nitro certificate bundle");
+    let parentKey = browserParseCertificate(browserPemToDer(NITRO_ROOT_CERT)).publicKeyRaw;
+    const now = Date.now();
+    for (const certificateDer of certificates) {
+      const certificate = browserParseCertificate(certificateDer);
+      if (now < browserParseAsn1Time(certificate.notBefore) || now > browserParseAsn1Time(certificate.notAfter)) throw new Error("AWS Nitro certificate is outside its validity period");
+      const key = await crypto.subtle.importKey("spki", parentKey, { name: "ECDSA", namedCurve: "P-384" }, false, ["verify"]);
+      const verified = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-384" }, key, browserEcdsaDerToRaw(certificate.signature), certificate.tbsCertificate);
+      if (!verified) throw new Error("AWS Nitro certificate-chain verification failed");
+      parentKey = certificate.publicKeyRaw;
+    }
+  }
+
+  async function browserVerifyNitro(document, nonce) {
+    const cose = browserDecodeCbor(document);
+    if (!Array.isArray(cose) || cose.length !== 4) throw new Error("Invalid COSE Sign1 attestation document");
+    const [protectedHeader, , payloadBytes, signature] = cose;
+    if (!(protectedHeader instanceof Uint8Array)
+      || !(payloadBytes instanceof Uint8Array)
+      || !(signature instanceof Uint8Array)) {
+      throw new Error("Invalid COSE Sign1 field types");
+    }
+    const protectedValues = browserDecodeCbor(protectedHeader);
+    if (protectedValues?.[1] !== -35) throw new Error("Attestation does not use COSE ES384");
+    const payload = browserDecodeCbor(payloadBytes);
+    if (!payload?.certificate) throw new Error("Attestation document has no signing certificate");
+    await browserVerifyCertificateChain([...(payload.cabundle || []), payload.certificate]);
+    const leaf = browserParseCertificate(payload.certificate);
+    const key = await crypto.subtle.importKey("spki", leaf.publicKeyRaw, { name: "ECDSA", namedCurve: "P-384" }, false, ["verify"]);
+    const signed = browserEncodeCbor(["Signature1", protectedHeader, new Uint8Array(0), payloadBytes]);
+    const verified = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-384" }, key, signature, signed);
+    if (!verified) throw new Error("COSE attestation signature verification failed");
+    if (!(payload.nonce instanceof Uint8Array) || !browserArraysEqual(payload.nonce, nonce)) throw new Error("Browser challenge nonce did not match the attestation document");
+    const pcrs = {};
+    for (const index of [0, 1, 2]) {
+      const value = payload.pcrs?.[index];
+      if (!(value instanceof Uint8Array) || value.length !== 48) {
+        throw new Error(`Attestation PCR${index} is missing or is not SHA-384 sized`);
+      }
+      if (value.every((byte) => byte === 0)) {
+        throw new Error(`Attestation PCR${index} is all-zero/debug`);
+      }
+      pcrs[`PCR${index}`] = browserBytesToHex(value);
+    }
+    return pcrs;
+  }
+
+  function setBrowserAttestationState(container, state, summary, pcrs) {
+    container.dataset.browserAttestationState = state;
+    container.querySelector("[data-browser-attestation-status]").textContent = state === "verified" ? "CHECKED HERE" : state === "failed" ? "FAILED" : "CHECKING";
+    container.querySelector("[data-browser-attestation-summary]").textContent = summary;
+    const pcrContainer = container.querySelector("[data-browser-attestation-pcrs]");
+    if (!pcrs) {
+      pcrContainer.hidden = true;
+      return;
+    }
+    for (const name of ["PCR0", "PCR1", "PCR2"]) {
+      const output = pcrContainer.querySelector(`[data-browser-pcr="${name}"]`);
+      if (output) output.textContent = pcrs[name] || "Not present";
+    }
+    pcrContainer.hidden = false;
+  }
+
+  let browserAttestationGeneration = 0;
+
+  async function verifyBrowserAttestation(container) {
+    const generation = ++browserAttestationGeneration;
+    if (!window.isSecureContext || !window.crypto?.subtle) {
+      setBrowserAttestationState(container, "failed", "This browser cannot run WebCrypto attestation verification in the current context.");
+      return;
+    }
+    setBrowserAttestationState(container, "checking", "Generating a fresh browser challenge and requesting Canary’s Nitro attestation…");
+    try {
+      const nonce = crypto.getRandomValues(new Uint8Array(32));
+      const response = await fetch("/attestation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ nonce: browserBytesToBase64(nonce) }),
+      });
+      if (!response.ok) throw new Error(`/attestation returned ${response.status}`);
+      const body = await response.json();
+      if (typeof body?.document !== "string") throw new Error("The attestation response contained no document");
+      const pcrs = await browserVerifyNitro(browserBase64ToBytes(body.document), nonce);
+      if (generation !== browserAttestationGeneration) return;
+      setBrowserAttestationState(container, "verified", "This browser checked certificate signatures to the pinned AWS Nitro root, certificate dates, the COSE ES384 signature, and its fresh challenge nonce.", pcrs);
+    } catch (error) {
+      if (generation !== browserAttestationGeneration) return;
+      const message = error instanceof Error ? error.message : "Browser attestation verification failed";
+      setBrowserAttestationState(container, "failed", `Browser attestation verification failed: ${message}`);
+    }
+  }
+
+  const browserAttestation = document.querySelector("[data-browser-attestation]");
+  if (browserAttestation) {
+    browserAttestation.querySelector("[data-browser-attestation-retry]")?.addEventListener("click", () => verifyBrowserAttestation(browserAttestation));
+    verifyBrowserAttestation(browserAttestation);
+  }
+
   const dialog = document.querySelector("#target-inspector");
   if (!(dialog instanceof HTMLDialogElement)) return;
 
@@ -18,8 +356,10 @@
   }
 
   function enrollmentCommand() {
-    if (!isNitroEnclave) return `canaryctl enroll --url ${window.location.origin} --insecure`;
-    return `caution verify --save-pcrs\n\ncanaryctl enroll --url ${window.location.origin} --pcrs .caution/trusted_hashes.json`;
+    if (!isNitroEnclave) {
+      return `# Saves the observed TOFU keys to canary-keys.json; Canary attestation is skipped.\ncanaryctl enroll --url ${window.location.origin} --insecure --keys canary-keys.json`;
+    }
+    return `caution verify --save-pcrs\n\n# Verifies fresh Canary attestation + expected PCR0/1/2, then writes the authenticated keys.\ncanaryctl enroll --url ${window.location.origin} --pcrs .caution/trusted_hashes.json --keys canary-keys.json`;
   }
 
   function verificationCommand(deploymentId, attemptId) {
@@ -68,6 +408,64 @@
     return value;
   }
 
+  function setEvidenceClaimsState(state, status, summary) {
+    const panel = dialog.querySelector("[data-evidence-claims]");
+    if (!panel) return;
+    panel.dataset.state = state;
+    panel.querySelector("[data-evidence-claims-status]").textContent = status;
+    panel.querySelector("[data-evidence-claims-summary]").textContent = summary;
+    if (state !== "verified") {
+      panel.querySelector("[data-evidence-claims-table]").hidden = true;
+    }
+  }
+
+  function renderEvidenceClaims(value) {
+    const authenticated = value?.authentication?.status === "verified"
+      && value?.authentication?.nonce_status === "verified";
+    if (!authenticated || !value?.observed_pcrs || !value?.expected_pcrs || !value?.pcr_matches) {
+      setEvidenceClaimsState(
+        "unavailable",
+        "NOT AUTHENTICATED",
+        "Raw evidence exists, but Canary retained no PCR values authenticated by the AWS chain, COSE signature, and probe nonce.",
+      );
+      return;
+    }
+
+    const panel = dialog.querySelector("[data-evidence-claims]");
+    for (const row of panel.querySelectorAll("[data-evidence-pcr]")) {
+      const index = row.dataset.evidencePcr;
+      row.querySelector("[data-pcr-observed]").textContent = value.observed_pcrs[index] || "Not present";
+      row.querySelector("[data-pcr-expected]").textContent = value.expected_pcrs[index] || "Not configured";
+      const matched = value.pcr_matches[index] === true;
+      const match = row.querySelector("[data-pcr-match]");
+      match.dataset.match = String(matched);
+      match.textContent = matched ? "MATCH" : "MISMATCH";
+    }
+    panel.querySelector("[data-evidence-claims-table]").hidden = false;
+    setEvidenceClaimsState(
+      "verified",
+      "AUTHENTICATED",
+      "Observed PCRs came from evidence whose AWS certificate chain, COSE signature, and fresh probe nonce Canary verified. Expected values are the configured policy.",
+    );
+  }
+
+  async function loadEvidenceClaims() {
+    const generation = loadGeneration;
+    setEvidenceClaimsState("loading", "LOADING", "Loading authenticated measurements…");
+    try {
+      const value = await requestJson(deploymentPath("evidence/claims"));
+      if (generation !== loadGeneration) return;
+      renderEvidenceClaims(value);
+    } catch (error) {
+      if (generation !== loadGeneration) return;
+      setEvidenceClaimsState(
+        "error",
+        "UNAVAILABLE",
+        error instanceof Error ? error.message : "Unable to load authenticated measurements.",
+      );
+    }
+  }
+
   function appendCell(row, value, className) {
     const cell = document.createElement("td");
     if (className) cell.className = className;
@@ -113,11 +511,101 @@
       copy.dataset.copyText = verificationCommand(currentDeployment.id, observation.id);
       copy.textContent = "Copy CLI";
       actions.append(copy);
+      if (observation.evidence_digest) {
+        const inspect = document.createElement("button");
+        inspect.className = "copy-button";
+        inspect.type = "button";
+        inspect.dataset.historyClaimsAttempt = observation.id;
+        inspect.textContent = "PCRs";
+        actions.append(inspect);
+      }
       row.append(actions);
       body.append(row);
     }
     table.append(body);
     output.append(table);
+  }
+
+  function appendHistoryPcrCell(row, value, className) {
+    const cell = document.createElement("td");
+    if (className) cell.className = className;
+    cell.textContent = value;
+    row.append(cell);
+  }
+
+  function renderHistoricalClaims(detailRow, value) {
+    const cell = detailRow.firstElementChild;
+    cell.replaceChildren();
+    if (!value?.observed_pcrs || !value?.expected_pcrs || !value?.pcr_matches) {
+      cell.textContent = "This attempt has raw evidence but no PCR values authenticated by its AWS chain, COSE signature, and nonce.";
+      return;
+    }
+
+    const table = document.createElement("table");
+    table.className = "pcr-table history-pcr-table";
+    const head = document.createElement("thead");
+    const header = document.createElement("tr");
+    for (const label of ["PCR", "Meaning", "Observed", "Expected", "Match"]) {
+      const th = document.createElement("th");
+      th.scope = "col";
+      th.textContent = label;
+      header.append(th);
+    }
+    head.append(header);
+    table.append(head);
+    const body = document.createElement("tbody");
+    const meanings = ["Enclave image", "Kernel + bootstrap", "Application"];
+    for (const index of ["0", "1", "2"]) {
+      const row = document.createElement("tr");
+      appendHistoryPcrCell(row, `PCR${index}`);
+      appendHistoryPcrCell(row, meanings[Number(index)]);
+      appendHistoryPcrCell(row, value.observed_pcrs[index]);
+      appendHistoryPcrCell(row, value.expected_pcrs[index]);
+      const matched = value.pcr_matches[index] === true;
+      appendHistoryPcrCell(
+        row,
+        matched ? "MATCH" : "MISMATCH",
+        `pcr-match pcr-match--${matched}`,
+      );
+      body.append(row);
+    }
+    table.append(body);
+    cell.append(table);
+  }
+
+  async function toggleHistoricalClaims(button) {
+    const attemptId = button.dataset.historyClaimsAttempt;
+    const sourceRow = button.closest("tr");
+    const existing = sourceRow?.nextElementSibling;
+    if (existing?.dataset.historyClaimsFor === attemptId) {
+      existing.remove();
+      button.textContent = "PCRs";
+      return;
+    }
+
+    const detailRow = document.createElement("tr");
+    detailRow.className = "history-claims-row";
+    detailRow.dataset.historyClaimsFor = attemptId;
+    const detailCell = document.createElement("td");
+    detailCell.colSpan = 5;
+    detailCell.textContent = "Loading authenticated PCR claims…";
+    detailRow.append(detailCell);
+    sourceRow.after(detailRow);
+    button.disabled = true;
+    const generation = loadGeneration;
+    try {
+      const value = await requestJson(
+        deploymentPath(`history/${attemptId}/evidence/claims`),
+      );
+      if (generation !== loadGeneration || !detailRow.isConnected) return;
+      renderHistoricalClaims(detailRow, value);
+      button.textContent = "Hide PCRs";
+    } catch (error) {
+      if (generation !== loadGeneration || !detailRow.isConnected) return;
+      detailCell.textContent = error instanceof Error ? error.message : "Unable to load historical PCR claims.";
+    } finally {
+      button.disabled = false;
+    }
   }
 
   async function loadHistory() {
@@ -166,6 +654,7 @@
     setCommand(byId("deployment-command"), currentDeployment.id);
     setLink("statement-json-link", "statement");
     setLink("evidence-json-link", "evidence");
+    setLink("evidence-claims-json-link", "evidence/claims");
     setLink("history-json-link", "history");
 
     for (const [name, panel] of panels) {
@@ -174,6 +663,7 @@
     }
     setActiveTab("overview");
     dialog.showModal();
+    loadEvidenceClaims();
     history.replaceState(null, "", `#deployment-${encodeURIComponent(currentDeployment.id)}`);
   }
 
@@ -209,6 +699,11 @@
     const tab = event.target.closest("[data-tab]");
     if (tab) {
       setActiveTab(tab.dataset.tab);
+      return;
+    }
+    const historyClaimsButton = event.target.closest("[data-history-claims-attempt]");
+    if (historyClaimsButton) {
+      toggleHistoricalClaims(historyClaimsButton);
       return;
     }
     const copyButton = event.target.closest("[data-copy], [data-copy-text]");

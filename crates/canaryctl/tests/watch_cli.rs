@@ -444,6 +444,10 @@ fn assert_signed_target_event(request: &Request, secret: &[u8; 32], statement: &
     assert_eq!(body["data"]["target"]["id"], "payments-prod");
     assert_eq!(body["data"]["result"]["status"], "PENDING");
     assert_eq!(body["data"]["result"]["statement"], *statement);
+    assert!(
+        body["data"]["result"].get("pcrs").is_none(),
+        "PCR diagnostics must not change the watcher event schema"
+    );
 }
 
 #[test]

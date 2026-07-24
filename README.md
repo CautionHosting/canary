@@ -10,9 +10,7 @@ linked Nitro evidence. A `VERIFIED` deployment means its most recent fresh evide
 matched its configured PCR0/1/2. It does not prove application correctness, traffic
 routing, or coverage of replicas that are not configured separately.
 
-## Quick start
-
-### 1. Install `canaryctl`
+## Build `canaryctl`
 
 ```sh
 cargo build --release --locked -p canaryctl
@@ -22,7 +20,9 @@ export PATH="$PWD/target/release:$PATH"
 You need a public HTTPS Bootproof `/attestation` endpoint for each deployment. Local
 use additionally needs Docker with BuildKit and linux/amd64 support.
 
-### 2. Add a deployment
+## Core flow
+
+### 1. Configure monitored deployments
 
 Preferred: reproduce the deployment with Caution and save its PCRs before adding it:
 
@@ -59,7 +59,7 @@ TOFU verifies fresh Nitro evidence before displaying candidate PCRs, but it does
 show that those PCRs came from reviewed or independently reproduced source. Confirm
 the values carefully; scripted use requires explicit `--accept-tofu`.
 
-### 3. Run Canary
+### 2. Run Canary
 
 For local development, create a signing seed and run the local image:
 
@@ -127,7 +127,35 @@ caution secret send-shard --keyring canary.private.asc
 The stable signing keyset survives restarts. An ephemeral Canary creates a new keyset
 and must be enrolled again after every restart.
 
-### 4. Enroll Canary, then verify deployments
+### 3. Inspect current status
+
+Open `https://canary.example.com/` (or `http://localhost:8080/` locally). Deployments
+and their current state appear first, followed by independent verification commands
+and Canary runtime details.
+
+Each deployment inspector shows authenticated observed PCR0/1/2 beside the configured
+expected values and their match result. Retained history rows can expand the same
+measurements for that exact attempt. Statement, raw evidence, decoded claims, and
+history JSON remain available as secondary inspection artifacts.
+
+![Canary status dashboard](readme_images/canaryd.png)
+
+![Deployment compact overview](readme_images/probe-demo.png)
+
+![Deployment history view](readme_images/history-demo.png)
+
+For a reported Nitro runtime, the browser evidence check starts as `NOT RUN` and
+makes no attestation request until selected. It generates a fresh nonce, uses
+WebCrypto to check certificate signatures to the pinned AWS Nitro root, certificate
+dates, COSE ES384, and nonce binding, then displays observed Canary PCR0/1/2 as
+`EVIDENCE CHECKED`.
+
+This convenience check does not implement the full X.509 policy validation used by
+`canaryctl` and does not compare independently supplied expected Canary PCR policy.
+The `/dev/nsm` result is self-reported, and the page and JavaScript come from the same
+origin being checked.
+
+### 4. Verify independently
 
 For Caution, enroll Canary's attested public keys once:
 
@@ -148,6 +176,10 @@ PCR0/1/2, and attested config/key binding verify successfully.
 
 Keep `canary-keys.json` as an integrity-critical public trust file. Enrollment never
 overwrites it. Select specific deployments with repeated `--deployment payments-prod`.
+Successful verification displays authenticated observed PCR0/1/2 in the normal
+output. `--verbose` displays full observed and expected values; `--json` provides the
+same values and match booleans under `pcrs`. Results without authenticated evidence
+emit `pcrs: null`.
 
 The local Docker flow has no Canary attestation. Pin its first observed keyset only
 with the explicit local TOFU mode:
@@ -169,10 +201,10 @@ both signatures on every result. For a `VERIFIED` result it also checks the link
 deployment Nitro evidence and PCR0/1/2. It does not authenticate the original Canary
 identity or configured deployment policy.
 
-## Per-target webhook watcher
+## Optional webhook watcher
 
-Run the external watcher when different Canary targets need different notification
-routes:
+The external watcher is optional. Run it when different Canary targets need
+different notification routes:
 
 ```sh
 cp canary-watch.example.json canary-watch.json
@@ -208,31 +240,6 @@ Retries reuse the same event ID, timestamp, body, and signature. Target events a
 `target.status_changed`, `target.read_failed`, and `target.read_recovered`; watcher
 events are `canary.unavailable`, `canary.verification_failed`, `canary.recovered`,
 and `watcher.heartbeat`.
-
-## Web UI
-
-Open `https://canary.example.com/` (or `http://localhost:8080/` locally) for current
-status. Each deployment has a compact overview and history view with ready-to-copy
-local `canaryctl verify` commands. Its inspector shows authenticated observed
-PCR0/1/2 beside the configured expected values and their match result; retained
-history rows can expand the same measurements for that exact attempt. Statement, raw
-evidence, decoded claims, and history JSON remain available as secondary inspection
-artifacts.
-
-![Canary status dashboard](readme_images/canaryd.png)
-
-![Deployment compact overview](readme_images/probe-demo.png)
-
-![Deployment history view](readme_images/history-demo.png)
-
-For a reported Nitro runtime, the home-page self-check also generates a fresh browser
-nonce, uses WebCrypto to check certificate signatures to the pinned AWS Nitro root,
-certificate dates, COSE ES384 and nonce binding, then displays the authenticated
-observed Canary PCR0/1/2. This convenience check does not implement the full X.509
-policy validation used by `canaryctl` and does not compare independently supplied
-expected Canary PCR policy. The `/dev/nsm` result remains self-reported, and the
-page's JavaScript comes from the same origin. Run `canaryctl enroll` with your own PCR
-input for the full independent Canary PCR, config and key-binding check.
 
 ## Advanced checks
 

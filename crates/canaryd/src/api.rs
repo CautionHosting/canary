@@ -901,6 +901,12 @@ mod tests {
         assert!(script.contains("isNitroEnclave"));
         assert!(script.contains("browserVerifyNitro"));
         assert!(script.contains("fetch(\"/attestation\""));
+        assert!(script.contains("[data-browser-attestation-run]"));
+        assert!(script.contains("\"EVIDENCE CHECKED\""));
+        assert!(script.contains(
+            ".addEventListener(\"click\", () => verifyBrowserAttestation(browserAttestation))"
+        ));
+        assert!(!script.contains("\n    verifyBrowserAttestation(browserAttestation);\n"));
         assert!(script.contains("requestJson(deploymentPath(\"evidence/claims\"))"));
         assert!(script.contains("Observed PCRs came from evidence"));
         assert!(script.contains("historyClaimsAttempt"));
@@ -1188,13 +1194,20 @@ mod tests {
         assert!(page.contains("data-runtime-environment=\"non_enclave\""));
         assert!(page.contains("data-identity-mode=\"stable\""));
         assert!(page.contains("id=\"self-check-heading\""));
-        assert!(!page.contains("data-browser-attestation-state=\"checking\""));
+        assert!(!page.contains("<section class=\"browser-attestation\" data-browser-attestation"));
         assert!(page.contains("LOCAL RUNTIME"));
         assert!(page.contains("Non-enclave runtime"));
         assert!(page.contains("External verification required"));
         assert!(page.contains(&digest('d')));
         assert!(page.contains("TOFU:"));
-        assert!(page.find("Deployments").unwrap() < page.find("Verify locally").unwrap());
+        assert!(
+            page.find("id=\"targets-heading\"").unwrap()
+                < page.find("id=\"verify-heading\"").unwrap()
+        );
+        assert!(
+            page.find("id=\"verify-heading\"").unwrap()
+                < page.find("id=\"self-check-heading\"").unwrap()
+        );
         assert!(!page.contains("Continuity monitor / V0"));
         assert!(page.contains("--success: #5cff9d"));
         assert!(page.contains("class=\"target-card status-verified\""));
@@ -1220,11 +1233,15 @@ mod tests {
         assert!(page.contains("data-runtime-environment=\"nitro_enclave\""));
         assert!(page.contains("NSM DETECTED"));
         assert!(page.contains("Nitro enclave detected"));
-        assert!(page.contains("data-browser-attestation-state=\"checking\""));
-        assert!(page.contains("Browser attestation check"));
+        assert!(page.contains("data-browser-attestation-state=\"idle\""));
+        assert!(page.contains("Browser evidence check"));
+        assert!(page.contains("data-browser-attestation-status>NOT RUN"));
+        assert!(page.contains("data-browser-attestation-run>Run browser evidence check"));
+        assert!(!page.contains("data-browser-attestation-state=\"checking\""));
         assert!(page.contains("PCR0 · image"));
-        assert!(page.contains("same-origin browser check"));
+        assert!(page.contains("same origin being checked"));
         assert!(page.contains("does not perform full X.509 policy validation"));
+        assert!(page.contains("does not perform full X.509 policy validation or compare independently supplied expected Canary PCR policy"));
         assert!(page.contains("Authenticated Nitro measurements"));
         assert!(page.contains("Decoded claims JSON"));
         assert!(page.contains("ATTESTED:"));
@@ -1232,6 +1249,14 @@ mod tests {
         assert!(page.contains("then writes the authenticated keys"));
         assert!(page.contains("caution verify --save-pcrs"));
         assert!(page.contains("--pcrs .caution/trusted_hashes.json"));
+        assert!(
+            page.find("id=\"targets-heading\"").unwrap()
+                < page.find("id=\"verify-heading\"").unwrap()
+        );
+        assert!(
+            page.find("id=\"verify-heading\"").unwrap()
+                < page.find("id=\"self-check-heading\"").unwrap()
+        );
         assert!(!page.contains("No Nitro device is visible"));
     }
 

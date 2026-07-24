@@ -8,16 +8,18 @@ use anyhow::{bail, Context, Result};
 use canary_core::{
     canonical::digest,
     config::Target,
-    evidence::{pcrs_from_hex, verify_evidence, EvidenceBundle},
+    evidence::{pcrs_from_hex, verify_evidence, AuthenticatedPcrClaims, EvidenceBundle},
     node::{ConfigDocument, IdentityMode},
     state::canonical_target_origin,
     statement::{Statement, Status},
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
-use serde_json::{json, Value};
 
 use crate::inspect::{self, InspectedNode, NodeTrust};
+
+mod output;
+use output::target_report_text;
 
 const SNAPSHOT_RETRIES: usize = 3;
 
@@ -44,6 +46,7 @@ pub(crate) struct VerifiedTargetResult {
     pub(crate) status: Status,
     pub(crate) reason: String,
     pub(crate) statement: Statement,
+    pub(crate) pcr_claims: Option<AuthenticatedPcrClaims>,
 }
 
 /// A per-target transport, parsing, or consistent-snapshot read failure. This
@@ -94,66 +97,6 @@ impl DeploymentResult {
     }
 }
 
-impl VerificationOutcome {
-    pub(crate) fn concise_text(&self) -> String {
-        let verified = self
-            .deployments
-            .iter()
-            .filter(|deployment| deployment.status_text() == "VERIFIED")
-            .count();
-        let canary = match (self.trust.as_str(), self.identity.as_str()) {
-            ("TOFU", _) => {
-                "Canary: TOFU — identity/config not independently authenticated".to_owned()
-            }
-            ("ATTESTED", "ephemeral") => {
-                "Canary: ATTESTED (ephemeral identity; re-enroll after restart)".to_owned()
-            }
-            ("ATTESTED", "stable") => "Canary: ATTESTED (stable identity)".to_owned(),
-            _ => format!("Canary: {} ({})", self.trust, self.identity),
-        };
-        let mut output = format!(
-            "{}  {}/{} deployment{}\n{}",
-            if self.ok { "VERIFIED" } else { "NOT VERIFIED" },
-            verified,
-            self.deployments.len(),
-            if self.deployments.len() == 1 { "" } else { "s" },
-            canary,
-        );
-        for deployment in &self.deployments {
-            let detail = if deployment.status_text() == "VERIFIED" {
-                "PCR0/1/2 + signatures"
-            } else {
-                deployment.reason()
-            };
-            output.push_str(&format!(
-                "\n{}  {}  {}",
-                deployment.id(),
-                deployment.status_text(),
-                detail
-            ));
-        }
-        output
-    }
-
-    pub(crate) fn json_result(&self) -> Value {
-        json!({
-            "trust": self.trust,
-            "identity": self.identity,
-            "scope": self.scope,
-            "attempt": self.attempt,
-            "deployments": self.deployments.iter().map(|deployment| json!({
-                "id": deployment.id(),
-                "status": deployment.status_text(),
-                "reason": deployment.reason(),
-            })).collect::<Vec<_>>(),
-        })
-    }
-
-    pub(crate) fn verbose_text(&self) -> String {
-        self.verbose.clone()
-    }
-}
-
 pub fn run(
     base_url: &str,
     pcrs_file: Option<&Path>,
@@ -188,12 +131,13 @@ pub fn run(
                     status: report.status,
                     reason: report.reason.clone(),
                     statement: report.statement,
+                    pcr_claims: report.pcr_claims,
                 })));
             }
             Err(TargetFetchError::Read(error)) => {
                 operational_error = true;
                 let reason = format!("{error:#}");
-                verbose.push_str(&format!("\nDEPLOYMENT {}\n  Verification            ERROR\n  Error                   {}\n", target.id, reason));
+                verbose.push_str(&output::target_error_text(&target.id, &reason));
                 deployments.push(DeploymentResult::ReadError(TargetReadError {
                     id: target.id.clone(),
                     reason,
@@ -202,7 +146,7 @@ pub fn run(
             Err(TargetFetchError::Verification(error)) => {
                 operational_error = true;
                 let reason = format!("{error:#}");
-                verbose.push_str(&format!("\nDEPLOYMENT {}\n  Verification            ERROR\n  Error                   {}\n", target.id, reason));
+                verbose.push_str(&output::target_error_text(&target.id, &reason));
                 deployments.push(DeploymentResult::VerificationError(
                     TargetVerificationError {
                         id: target.id.clone(),
@@ -303,17 +247,15 @@ pub fn run_history(
             Some(evidence),
             issued_at,
         )?,
-        None => TargetReport::from_statement(&historical.statement, false, issued_at),
+        None => TargetReport::from_statement(&historical.statement, false, None, issued_at),
     };
 
     let mut verbose = node_report_text(&node, pcrs_file, keys_path);
-    verbose.push_str(&format!(
-        "\nHISTORICAL ATTEMPT {attempt_id}\n  Deployment              {target_id}\n  Attempted at            {}\n  Probe result            {}\n  Statement signatures    PASS\n  Statement validity      PASS AT SIGNED ISSUANCE TIME\n  Config binding          PASS\n  Evidence replay         {}\n  Signed status           {}\n  Signed reason           {}\n  History metadata        UNSIGNED / DIAGNOSTIC",
-        historical.observation.attempted_at,
-        historical.observation.attempt_reason,
-        if report.evidence_replayed { "REPRODUCED" } else { "NOT AVAILABLE" },
-        status_text(report.status),
-        report.reason,
+    verbose.push_str(&output::historical_attempt_text(
+        attempt_id,
+        target_id,
+        &historical.observation,
+        &report,
     ));
     Ok(VerificationOutcome {
         ok: report.status == Status::Verified,
@@ -328,6 +270,7 @@ pub fn run_history(
             status: report.status,
             reason: report.reason.clone(),
             statement: report.statement,
+            pcr_claims: report.pcr_claims,
         }))],
         verbose,
     })
@@ -367,12 +310,14 @@ struct TargetReport {
     expires_at: String,
     evidence_digest: Option<String>,
     checked_at: DateTime<Utc>,
+    pcr_claims: Option<AuthenticatedPcrClaims>,
 }
 
 impl TargetReport {
     fn from_statement(
         statement: &Statement,
         evidence_replayed: bool,
+        pcr_claims: Option<AuthenticatedPcrClaims>,
         checked_at: DateTime<Utc>,
     ) -> Self {
         Self {
@@ -386,6 +331,7 @@ impl TargetReport {
             expires_at: statement.payload.expires_at.clone(),
             evidence_digest: statement.payload.evidence_digest.clone(),
             checked_at,
+            pcr_claims,
         }
     }
 }
@@ -486,7 +432,7 @@ fn verify_target_artifacts(
     let payload = &statement.payload;
 
     match (payload.evidence_digest.as_deref(), evidence) {
-        (None, None) => Ok(TargetReport::from_statement(statement, false, now)),
+        (None, None) => Ok(TargetReport::from_statement(statement, false, None, now)),
         (None, Some(_)) => bail!("statement carries no evidence digest but evidence was returned"),
         (Some(_), None) => bail!("statement references evidence but no evidence was returned"),
         (Some(expected_digest), Some(bundle)) => {
@@ -544,7 +490,12 @@ fn verify_target_artifacts(
                 }
                 Status::Verified | Status::Failed => {}
             }
-            Ok(TargetReport::from_statement(statement, true, now))
+            Ok(TargetReport::from_statement(
+                statement,
+                true,
+                outcome.pcr_claims,
+                now,
+            ))
         }
     }
 }
@@ -690,92 +641,6 @@ fn identity_text(node: &InspectedNode) -> String {
     }
 }
 
-fn target_report_text(target: &Target, report: &TargetReport, trust: NodeTrust) -> String {
-    let mut output = String::new();
-    writeln!(output, "\nDEPLOYMENT {}", target.id).unwrap();
-    writeln!(output, "  Claim                   CURRENT PUBLISHED").unwrap();
-    writeln!(output, "  Deployment origin       {}", report.target_origin).unwrap();
-    match trust {
-        NodeTrust::Attested => {
-            writeln!(
-                output,
-                "  PCR policy source       MEASURED + ATTESTED CONFIG"
-            )
-            .unwrap();
-        }
-        NodeTrust::UnattestedDev => {
-            writeln!(
-                output,
-                "  PCR policy source       UNATTESTED CONFIG — TOFU SIGNER"
-            )
-            .unwrap();
-        }
-    }
-    writeln!(
-        output,
-        "  Checked at              {}",
-        timestamp(report.checked_at)
-    )
-    .unwrap();
-    writeln!(
-        output,
-        "  Evidence observed at    {}",
-        report.observed_at.as_deref().unwrap_or("—")
-    )
-    .unwrap();
-    writeln!(output, "  Statement issued at     {}", report.issued_at).unwrap();
-    writeln!(output, "  Statement expires at    {}", report.expires_at).unwrap();
-    writeln!(
-        output,
-        "  Statement signatures    PASS — ED25519 + ML-DSA-65"
-    )
-    .unwrap();
-    writeln!(output, "  Statement freshness     PASS AT CHECKED TIME").unwrap();
-    writeln!(output, "  Statement/config binding PASS").unwrap();
-    if report.evidence_replayed {
-        let evidence_digest = report
-            .evidence_digest
-            .as_deref()
-            .expect("replayed evidence always has a signed digest");
-        writeln!(
-            output,
-            "  Statement/evidence link PASS — {}",
-            evidence_digest
-        )
-        .unwrap();
-        match report.status {
-            Status::Verified => {
-                writeln!(output, "  Evidence replay         PASS AT OBSERVED TIME").unwrap();
-                writeln!(output, "  Deployment Nitro + PCRs PASS").unwrap();
-            }
-            Status::Failed => {
-                writeln!(
-                    output,
-                    "  Evidence replay         REPRODUCED {} AT OBSERVED TIME",
-                    report.reason
-                )
-                .unwrap();
-                writeln!(output, "  Deployment Nitro + PCRs FAILED — AUTHENTICATED").unwrap();
-            }
-            Status::Pending | Status::Unreachable | Status::Stale => {
-                unreachable!("non-definitive states cannot carry replayed evidence")
-            }
-        }
-    } else {
-        writeln!(output, "  Statement/evidence link NOT PRESENT").unwrap();
-        writeln!(output, "  Evidence replay         NOT AVAILABLE").unwrap();
-        writeln!(output, "  Deployment Nitro + PCRs NOT CHECKED").unwrap();
-    }
-    writeln!(
-        output,
-        "  Signed status           {}",
-        status_text(report.status)
-    )
-    .unwrap();
-    writeln!(output, "  Signed reason           {}", report.reason).unwrap();
-    output
-}
-
 fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
@@ -872,6 +737,27 @@ mod tests {
         )
     }
 
+    fn outcome_for(report: TargetReport, trust: &str, identity: &str) -> VerificationOutcome {
+        VerificationOutcome {
+            ok: report.status == Status::Verified,
+            trust: trust.to_owned(),
+            identity: identity.to_owned(),
+            scope: "current".to_owned(),
+            attempt: None,
+            node_id: "canary-main".to_owned(),
+            config_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            deployments: vec![DeploymentResult::Verified(Box::new(VerifiedTargetResult {
+                id: report.statement.payload.target_id.clone(),
+                status: report.status,
+                reason: report.reason,
+                statement: report.statement,
+                pcr_claims: report.pcr_claims,
+            }))],
+            verbose: String::new(),
+        }
+    }
+
     #[test]
     fn verified_statement_and_evidence_validate_end_to_end() {
         let (config, keys, statement, evidence, now) =
@@ -887,6 +773,13 @@ mod tests {
         .unwrap();
         assert_eq!(report.status, Status::Verified);
         assert!(report.evidence_replayed);
+        let claims = report
+            .pcr_claims
+            .as_ref()
+            .expect("passing evidence has authenticated PCR claims");
+        assert_eq!(claims.observed.pcr0, PCR_0_AND_1);
+        assert_eq!(claims.expected.pcr0, PCR_0_AND_1);
+        assert!(claims.matches.pcr0 && claims.matches.pcr1 && claims.matches.pcr2);
 
         let development =
             target_report_text(&config.config.targets[0], &report, NodeTrust::UnattestedDev);
@@ -898,9 +791,24 @@ mod tests {
         assert!(development.contains(&format!("Checked at              {}", timestamp(now))));
         assert!(development.contains(&statement.payload.observed_at.clone().unwrap()));
         assert!(development.contains(&statement.payload.expires_at));
+        assert!(development.contains(&format!("PCR0 observed           {PCR_0_AND_1}")));
+        assert!(development.contains(&format!("PCR0 expected           {PCR_0_AND_1}")));
+        assert!(development.contains("PCR0 comparison         PASS"));
 
         let attested = target_report_text(&config.config.targets[0], &report, NodeTrust::Attested);
         assert!(attested.contains("PCR policy source       MEASURED + ATTESTED CONFIG"));
+
+        let observation = HistoricalObservation {
+            id: 7,
+            target_id: "payments-prod".to_owned(),
+            attempted_at: now,
+            attempt_reason: "ALL_CHECKS_PASSED".to_owned(),
+            config_digest: config.config_digest,
+        };
+        let historical = output::historical_attempt_text(7, "payments-prod", &observation, &report);
+        assert!(historical.contains(&format!("PCR0 observed           {PCR_0_AND_1}")));
+        assert!(historical.contains(&format!("PCR0 expected           {PCR_0_AND_1}")));
+        assert!(historical.contains("PCR0 comparison         PASS"));
     }
 
     #[test]
@@ -919,9 +827,60 @@ mod tests {
         .unwrap();
         assert_eq!(report.status, Status::Failed);
         assert!(report.evidence_replayed);
+        let claims = report
+            .pcr_claims
+            .as_ref()
+            .expect("PCR mismatch retains authenticated claims");
+        assert_eq!(claims.observed.pcr0, PCR_0_AND_1);
+        assert_eq!(claims.expected.pcr0, wrong_pcr);
+        assert!(!claims.matches.pcr0);
+        assert!(claims.matches.pcr1 && claims.matches.pcr2);
         let output = target_report_text(&config.config.targets[0], &report, NodeTrust::Attested);
         assert!(output.contains("Evidence replay         REPRODUCED PCR_MISMATCH AT OBSERVED TIME"));
         assert!(output.contains("Deployment Nitro + PCRs FAILED — AUTHENTICATED"));
+        assert!(output.contains("PCR0 comparison         FAIL"));
+    }
+
+    #[test]
+    fn unauthenticated_evidence_never_exposes_pcr_values() {
+        let (config, keys, statement, mut evidence, now) =
+            fixture(Status::Failed, "NONCE_MISMATCH", PCR_0_AND_1);
+        evidence.nonce = STANDARD.encode([0_u8; 32]);
+        let report = verify_target_artifacts(
+            &config,
+            &keys,
+            &config.config.targets[0],
+            &statement,
+            Some(&evidence),
+            now,
+        )
+        .unwrap();
+        assert_eq!(report.status, Status::Failed);
+        assert!(report.pcr_claims.is_none());
+
+        let verbose = target_report_text(&config.config.targets[0], &report, NodeTrust::Attested);
+        assert!(verbose.contains("Authenticated PCRs      UNAVAILABLE"));
+        assert!(!verbose.contains("PCR0 observed"));
+        assert!(!verbose.contains(PCR_0_AND_1));
+
+        let outcome = outcome_for(report, "ATTESTED", "stable");
+        assert_eq!(
+            outcome.json_result()["deployments"][0]["pcrs"],
+            serde_json::Value::Null
+        );
+        let concise = outcome.concise_text();
+        assert!(concise.contains("Authenticated PCRs UNAVAILABLE"));
+        assert!(!concise.contains("  PCR0 "));
+        let mut historical_outcome = outcome;
+        historical_outcome.scope = "history".to_owned();
+        historical_outcome.attempt = Some(7);
+        assert!(historical_outcome
+            .concise_text()
+            .contains("Authenticated PCRs UNAVAILABLE"));
+        assert!(
+            output::target_error_text("payments-prod", "invalid signature")
+                .contains("Authenticated PCRs      UNAVAILABLE")
+        );
     }
 
     #[test]
@@ -954,29 +913,39 @@ mod tests {
 
     #[test]
     fn concise_and_json_renderers_keep_trust_and_failure_meaning() {
-        let (_, _, verified_statement, _, _) =
+        let (config, keys, verified_statement, evidence, now) =
             fixture(Status::Verified, "ALL_CHECKS_PASSED", PCR_0_AND_1);
-        let attested = VerificationOutcome {
-            ok: true,
-            trust: "ATTESTED".to_owned(),
-            identity: "stable".to_owned(),
-            scope: "current".to_owned(),
-            attempt: None,
-            node_id: "canary-main".to_owned(),
-            config_digest:
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
-            deployments: vec![DeploymentResult::Verified(Box::new(VerifiedTargetResult {
-                id: "payments-prod".to_owned(),
-                status: Status::Verified,
-                reason: "ALL_CHECKS_PASSED".to_owned(),
-                statement: verified_statement,
-            }))],
-            verbose: String::new(),
-        };
+        let verified_report = verify_target_artifacts(
+            &config,
+            &keys,
+            &config.config.targets[0],
+            &verified_statement,
+            Some(&evidence),
+            now,
+        )
+        .unwrap();
+        let attested = outcome_for(verified_report, "ATTESTED", "stable");
         let text = attested.concise_text();
         assert!(text.contains("VERIFIED  1/1 deployment"));
         assert!(text.contains("Canary: ATTESTED (stable identity)"));
         assert!(text.contains("PCR0/1/2 + signatures"));
+        assert!(text.contains("  PCR0 ef09...cc03  MATCH"));
+        assert!(text.contains("  PCR2 21b9...500a  MATCH"));
+        assert!(!text.contains(&format!("  PCR0 {PCR_0_AND_1}  MATCH")));
+        let rendered = attested.json_result();
+        assert_eq!(
+            rendered["deployments"][0]["pcrs"]["evidence_authentication"],
+            "verified"
+        );
+        assert_eq!(
+            rendered["deployments"][0]["pcrs"]["observed"]["0"],
+            PCR_0_AND_1
+        );
+        assert_eq!(rendered["deployments"][0]["pcrs"]["expected"]["2"], PCR_2);
+        assert_eq!(
+            rendered["deployments"][0]["pcrs"]["matches"],
+            serde_json::json!({"0": true, "1": true, "2": true})
+        );
         match &attested.deployments[0] {
             DeploymentResult::Verified(result) => {
                 assert_eq!(result.status, Status::Verified);
@@ -987,32 +956,34 @@ mod tests {
             }
         }
 
-        let (_, _, failed_statement, _, _) = fixture(Status::Failed, "PCR_MISMATCH", PCR_0_AND_1);
-        let tofu_negative = VerificationOutcome {
-            ok: false,
-            trust: "TOFU".to_owned(),
-            identity: "unknown".to_owned(),
-            scope: "current".to_owned(),
-            attempt: None,
-            node_id: "canary-main".to_owned(),
-            config_digest:
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
-            deployments: vec![DeploymentResult::Verified(Box::new(VerifiedTargetResult {
-                id: "payments-prod".to_owned(),
-                status: Status::Failed,
-                reason: "PCR_MISMATCH".to_owned(),
-                statement: failed_statement,
-            }))],
-            verbose: String::new(),
-        };
+        let wrong_pcr = format!("{}0", &PCR_0_AND_1[..PCR_0_AND_1.len() - 1]);
+        let (config, keys, failed_statement, evidence, now) =
+            fixture(Status::Failed, "PCR_MISMATCH", &wrong_pcr);
+        let failed_report = verify_target_artifacts(
+            &config,
+            &keys,
+            &config.config.targets[0],
+            &failed_statement,
+            Some(&evidence),
+            now,
+        )
+        .unwrap();
+        let tofu_negative = outcome_for(failed_report, "TOFU", "unknown");
         let text = tofu_negative.concise_text();
         assert!(text.contains("NOT VERIFIED  0/1 deployment"));
         assert!(text.contains("identity/config not independently authenticated"));
         assert!(text.contains("payments-prod  FAILED  PCR_MISMATCH"));
+        assert!(text.contains(&format!(
+            "PCR0 observed={PCR_0_AND_1} expected={wrong_pcr}  MISMATCH"
+        )));
         assert_eq!(tofu_negative.json_result()["trust"], "TOFU");
         assert_eq!(
             tofu_negative.json_result()["deployments"][0]["reason"],
             "PCR_MISMATCH"
+        );
+        assert_eq!(
+            tofu_negative.json_result()["deployments"][0]["pcrs"]["matches"]["0"],
+            false
         );
 
         let read_error = DeploymentResult::ReadError(TargetReadError {
@@ -1030,6 +1001,25 @@ mod tests {
         assert_eq!(
             verification_error.reason(),
             "statement signature verification failed"
+        );
+        let error_outcome = VerificationOutcome {
+            ok: false,
+            trust: "ATTESTED".to_owned(),
+            identity: "stable".to_owned(),
+            scope: "current".to_owned(),
+            attempt: None,
+            node_id: "canary-main".to_owned(),
+            config_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            deployments: vec![read_error, verification_error],
+            verbose: String::new(),
+        };
+        assert_eq!(
+            error_outcome
+                .concise_text()
+                .matches("Authenticated PCRs UNAVAILABLE")
+                .count(),
+            2
         );
     }
 

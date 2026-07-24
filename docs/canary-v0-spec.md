@@ -342,6 +342,32 @@ attempt. These timestamps are signed Canary freshness fields, not an external
 timestamp-authority proof. Multiple selected targets are independently fetched and
 checked; the command must not imply an atomic aggregate snapshot.
 
+Current and `--attempt` verification must present PCR claims only when
+`verify_evidence` produced authenticated claims after validating the AWS chain, COSE
+signature and nonce. Normal output shows compact authenticated observed PCR0/1/2 and
+their match result; a mismatch shows the complete observed and expected values.
+`--verbose` always shows the complete observed value, expected value and result for
+each PCR.
+
+JSON output retains `schema_version: 1` and all existing fields. Each deployment adds:
+
+```json
+{
+  "pcrs": {
+    "evidence_authentication": "verified",
+    "observed": {"0": "...", "1": "...", "2": "..."},
+    "expected": {"0": "...", "1": "...", "2": "..."},
+    "matches": {"0": true, "1": true, "2": true}
+  }
+}
+```
+
+`pcrs` is `null` when authenticated evidence claims are unavailable. Signature,
+certificate-chain or nonce failures must state that authenticated PCRs are
+unavailable. Output must never substitute values decoded only from raw evidence, the
+unsigned manifest or configuration. These are CLI presentation requirements and do
+not change any signed or HTTP protocol format.
+
 The live report must distinguish:
 
 - attested Canary identity from development/TOFU signer continuity;
@@ -639,13 +665,15 @@ resolved by `current_exe()` at startup. It identifies the exact daemon bytes for
 correlation, but it is also self-reported and does not replace independently
 reproduced Canary PCR0/1/2 or fresh node attestation.
 
-When the server reports `nitro_enclave`, the page may challenge `POST /attestation`
-with a fresh browser-generated nonce and use same-origin JavaScript to check
-certificate signatures to the pinned AWS Nitro root, certificate dates, COSE ES384
-and the nonce before displaying observed Canary PCR0/1/2. It must disclose that this
-convenience check does not perform the full X.509 policy validation used by
-`canaryctl`, that expected Canary PCR policy was not independently checked, and that
-the page and JavaScript come from the same origin. It does not replace
+When the server reports `nitro_enclave`, the page may offer a browser evidence check.
+It must start as `NOT RUN`, make no `POST /attestation` request on page load, and run
+only after explicit user action. The check challenges `POST /attestation` with a
+fresh browser-generated nonce and uses same-origin JavaScript to check certificate
+signatures to the pinned AWS Nitro root, certificate dates, COSE ES384 and the nonce
+before displaying observed Canary PCR0/1/2 as `EVIDENCE CHECKED`. It must disclose
+that this convenience check does not perform the full X.509 policy validation used
+by `canaryctl`, that expected Canary PCR policy was not independently checked, and
+that the page and JavaScript come from the same origin. It does not replace
 `canaryctl enroll` with operator-supplied Canary PCRs.
 
 History-list fields are unsigned diagnostics. The detail route returns the exact
@@ -868,10 +896,12 @@ signatures without access to Caution internals.
     `caution verify`.
 14. README and CLI confirmation explicitly call live PCR capture TOFU and make no
     source-reproduction claim.
-15. The UI lists monitored deployments before verification guidance, provides concise
-    local verification commands, and retains raw protocol artifacts as secondary
-    links.
-16. Fresh signed node metadata labels `identity_mode`; ephemeral startup rejects a
+15. The UI lists monitored deployments before independent verification guidance and
+    Canary runtime details, provides concise local verification commands, and retains
+    raw protocol artifacts as secondary links.
+16. The Nitro browser evidence check starts idle, performs no request until explicit
+    user action, and labels a successful convenience check `EVIDENCE CHECKED`.
+17. Fresh signed node metadata labels `identity_mode`; ephemeral startup rejects a
     simultaneous `CANARY_MASTER_SEED`, generates distinct keysets across starts and
     requires no Locksmith artifacts or shard release.
 

@@ -289,8 +289,10 @@ IwLz3/Y=
 
   function setBrowserAttestationState(container, state, summary, pcrs) {
     container.dataset.browserAttestationState = state;
-    container.querySelector("[data-browser-attestation-status]").textContent = state === "verified" ? "CHECKED HERE" : state === "failed" ? "FAILED" : "CHECKING";
+    container.querySelector("[data-browser-attestation-status]").textContent = state === "checked" ? "EVIDENCE CHECKED" : state === "failed" ? "FAILED" : state === "checking" ? "CHECKING" : "NOT RUN";
     container.querySelector("[data-browser-attestation-summary]").textContent = summary;
+    const runButton = container.querySelector("[data-browser-attestation-run]");
+    if (runButton) runButton.disabled = state === "checking";
     const pcrContainer = container.querySelector("[data-browser-attestation-pcrs]");
     if (!pcrs) {
       pcrContainer.hidden = true;
@@ -325,18 +327,17 @@ IwLz3/Y=
       if (typeof body?.document !== "string") throw new Error("The attestation response contained no document");
       const pcrs = await browserVerifyNitro(browserBase64ToBytes(body.document), nonce);
       if (generation !== browserAttestationGeneration) return;
-      setBrowserAttestationState(container, "verified", "This browser checked certificate signatures to the pinned AWS Nitro root, certificate dates, the COSE ES384 signature, and its fresh challenge nonce.", pcrs);
+      setBrowserAttestationState(container, "checked", "This browser checked certificate signatures to the pinned AWS Nitro root, certificate dates, the COSE ES384 signature, and its fresh challenge nonce. Expected Canary PCR policy was not checked.", pcrs);
     } catch (error) {
       if (generation !== browserAttestationGeneration) return;
-      const message = error instanceof Error ? error.message : "Browser attestation verification failed";
-      setBrowserAttestationState(container, "failed", `Browser attestation verification failed: ${message}`);
+      const message = error instanceof Error ? error.message : "Browser evidence check failed";
+      setBrowserAttestationState(container, "failed", `Browser evidence check failed: ${message}`);
     }
   }
 
   const browserAttestation = document.querySelector("[data-browser-attestation]");
   if (browserAttestation) {
-    browserAttestation.querySelector("[data-browser-attestation-retry]")?.addEventListener("click", () => verifyBrowserAttestation(browserAttestation));
-    verifyBrowserAttestation(browserAttestation);
+    browserAttestation.querySelector("[data-browser-attestation-run]")?.addEventListener("click", () => verifyBrowserAttestation(browserAttestation));
   }
 
   const dialog = document.querySelector("#target-inspector");

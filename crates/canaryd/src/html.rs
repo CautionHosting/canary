@@ -81,13 +81,8 @@ h1 { margin: 0; color: #f2f8fa; font-size: clamp(34px, 5vw, 54px); font-weight: 
 }
 .raw-nav a:hover, .raw-link:hover { background: var(--accent-soft); border-color: rgba(99, 220, 255, .32); }
 
-.node-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 32px; margin: 34px 0 22px; }
-.meta-item { min-width: 0; }
 .label, dt { display: block; margin: 0 0 5px; }
 .value, dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #cbd7dc; }
-.trust-note { padding: 14px 16px; border: 1px solid rgba(99, 220, 255, .16); border-left: 2px solid rgba(99, 220, 255, .52); background: rgba(99, 220, 255, .025); }
-.trust-note strong { color: var(--warning); font-weight: 650; }
-.trust-note p { margin: 0; color: #aab7be; }
 
 .self-check {
   --self-check-color: var(--warning);
@@ -116,13 +111,14 @@ h1 { margin: 0; color: #f2f8fa; font-size: clamp(34px, 5vw, 54px); font-weight: 
 .browser-attestation h3 { margin: 0 0 5px; color: #edf5f8; font-size: 13px; font-weight: 650; }
 .browser-attestation p { margin: 0; color: var(--muted); font-size: 12px; }
 .browser-attestation-status { flex: 0 0 auto; padding: 5px 8px; color: var(--warning); border: 1px solid color-mix(in srgb, var(--warning) 38%, transparent); background: color-mix(in srgb, var(--warning) 10%, transparent); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
-.browser-attestation[data-browser-attestation-state="verified"] .browser-attestation-status { color: var(--success); border-color: color-mix(in srgb, var(--success) 38%, transparent); background: color-mix(in srgb, var(--success) 10%, transparent); }
+.browser-attestation[data-browser-attestation-state="checked"] .browser-attestation-status { color: var(--success); border-color: color-mix(in srgb, var(--success) 38%, transparent); background: color-mix(in srgb, var(--success) 10%, transparent); }
 .browser-attestation[data-browser-attestation-state="failed"] .browser-attestation-status { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 38%, transparent); background: color-mix(in srgb, var(--danger) 10%, transparent); }
 .browser-attestation-details { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 20px; margin: 16px 0 0; }
 .browser-attestation-details dd { margin: 4px 0 0; color: #cbd8dd; font-size: 11px; overflow-wrap: anywhere; }
 .browser-attestation-actions { display: flex; align-items: center; gap: 12px; margin-top: 15px; }
 .browser-attestation-actions button { padding: 6px 8px; color: var(--accent); background: transparent; border: 1px solid rgba(99, 220, 255, .25); cursor: pointer; font-size: 11px; }
 .browser-attestation-actions button:hover { color: var(--accent-bright); background: var(--accent-soft); }
+.browser-attestation-actions button:disabled { color: var(--muted); cursor: wait; opacity: .7; }
 
 .verify-box { margin: 0 0 46px; padding: 22px; border: 1px solid var(--border); background: rgba(14, 21, 27, .38); }
 .verify-box-head { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; margin-bottom: 12px; }
@@ -232,7 +228,7 @@ dialog::backdrop { background: rgba(1, 5, 8, .82); backdrop-filter: blur(5px); }
   .shell { padding: 42px 18px 58px; }
   .topline { display: block; }
   .raw-nav { justify-content: flex-start; margin-top: 24px; }
-  .node-meta, .targets, .self-check-grid, .browser-attestation-details { grid-template-columns: 1fr; }
+  .targets, .self-check-grid, .browser-attestation-details { grid-template-columns: 1fr; }
   .self-check-grid .detail--wide { grid-column: auto; }
   .self-check-boundary { grid-template-columns: 1fr; gap: 7px; }
   .panel-intro { grid-template-columns: 1fr; gap: 8px; }
@@ -240,7 +236,6 @@ dialog::backdrop { background: rgba(1, 5, 8, .82); backdrop-filter: blur(5px); }
 }
 
 @media (max-width: 520px) {
-  .trust-note { grid-template-columns: 1fr; gap: 7px; }
   .verify-box-head { display: block; }
   .command-row { grid-template-columns: 1fr; }
   .copy-button { min-height: 42px; border-top: 1px solid var(--border-strong); border-left: 0; }
@@ -309,19 +304,7 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
     page.push_str(environment_token(snapshot.runtime.environment));
     page.push_str("\" data-identity-mode=\"");
     page.push_str(identity_mode_token(snapshot.runtime.identity_mode));
-    page.push_str("\"><main class=\"shell\"><header class=\"intro\"><div class=\"topline\"><div><p class=\"eyebrow\">canaryd</p><h1>Canary status</h1><p class=\"lede\">Canary checks each deployment’s Nitro attestation against expected PCR0/1/2 and signs the result.</p></div><nav class=\"raw-nav\" aria-label=\"Raw node documents\"><a href=\"/status.json\">Status JSON</a><a href=\"/config.json\">Config JSON</a><a href=\"/keys.json\">Keys JSON</a></nav></div><div class=\"node-meta\"><div class=\"meta-item\"><span class=\"label\">Node</span><div class=\"value\">");
-    push_escaped(&mut page, &snapshot.node_id);
-    page.push_str("</div></div><div class=\"meta-item\"><span class=\"label\">Identity</span><div class=\"value\">");
-    page.push_str(identity_mode_label(snapshot.runtime.identity_mode));
-    page.push_str("</div></div><div class=\"meta-item\"><span class=\"label\">Last updated</span><div class=\"value\">");
-    push_escaped(&mut page, &snapshot.generated_at.to_rfc3339());
-    page.push_str("</div></div></div><div class=\"trust-note\" role=\"note\"><p>");
-    page.push_str(trust_summary(
-        snapshot.runtime.environment,
-        snapshot.runtime.identity_mode,
-    ));
-    page.push_str("</p></div></header>");
-    push_self_check(&mut page, snapshot);
+    page.push_str("\"><main class=\"shell\"><header class=\"intro\"><div class=\"topline\"><div><p class=\"eyebrow\">canaryd</p><h1>Canary status</h1><p class=\"lede\">Canary checks each deployment’s Nitro attestation against expected PCR0/1/2 and signs the result.</p></div><nav class=\"raw-nav\" aria-label=\"Raw node documents\"><a href=\"/status.json\">Status JSON</a><a href=\"/config.json\">Config JSON</a><a href=\"/keys.json\">Keys JSON</a></nav></div></header>");
     page.push_str("<section class=\"targets-section\" aria-labelledby=\"targets-heading\"><div class=\"section-heading\"><h2 id=\"targets-heading\">Deployments</h2><span class=\"target-count\">");
     page.push_str(&snapshot.targets.len().to_string());
     page.push_str(if snapshot.targets.len() == 1 {
@@ -394,6 +377,7 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
         snapshot.runtime.environment,
         snapshot.runtime.identity_mode,
     );
+    push_self_check(&mut page, snapshot);
     page.push_str(INSPECTOR);
     page
 }
@@ -404,7 +388,7 @@ fn push_self_check(page: &mut String, snapshot: &RuntimeSnapshot) {
     if is_enclave {
         page.push_str(" self-check--enclave");
     }
-    page.push_str("\" aria-labelledby=\"self-check-heading\"><header class=\"self-check-head\"><div><span class=\"self-check-kicker\">Node integrity</span><h2 id=\"self-check-heading\">Canary self-check</h2></div><span class=\"self-check-badge\">");
+    page.push_str("\" aria-labelledby=\"self-check-heading\"><header class=\"self-check-head\"><div><span class=\"self-check-kicker\">Node details</span><h2 id=\"self-check-heading\">Canary runtime details</h2></div><span class=\"self-check-badge\">");
     page.push_str(if is_enclave {
         "NSM DETECTED"
     } else {
@@ -416,7 +400,13 @@ fn push_self_check(page: &mut String, snapshot: &RuntimeSnapshot) {
     } else {
         "No AWS Nitro Security Module is visible. The service is ready, but its initial identity and measured configuration are not remotely attested."
     });
-    page.push_str("</p><dl class=\"self-check-grid\"><div class=\"detail\"><dt>Execution environment</dt><dd class=\"self-check-value\">");
+    page.push_str("</p><dl class=\"self-check-grid\"><div class=\"detail\"><dt>Node</dt><dd>");
+    push_escaped(page, &snapshot.node_id);
+    page.push_str("</dd></div><div class=\"detail\"><dt>Last updated</dt><dd>");
+    push_escaped(page, &snapshot.generated_at.to_rfc3339());
+    page.push_str(
+        "</dd></div><div class=\"detail\"><dt>Execution environment</dt><dd class=\"self-check-value\">",
+    );
     page.push_str(environment_label(snapshot.runtime.environment));
     page.push_str("</dd></div><div class=\"detail\"><dt>Service</dt><dd class=\"self-check-value\">READY</dd></div><div class=\"detail\"><dt>Identity</dt><dd>");
     page.push_str(identity_mode_label(snapshot.runtime.identity_mode));
@@ -430,7 +420,7 @@ fn push_self_check(page: &mut String, snapshot: &RuntimeSnapshot) {
     push_escaped(page, &snapshot.config_digest);
     page.push_str("</code></dd></div></dl>");
     if is_enclave {
-        page.push_str("<section class=\"browser-attestation\" data-browser-attestation data-browser-attestation-state=\"checking\" aria-labelledby=\"browser-attestation-heading\"><div class=\"browser-attestation-head\"><div><h3 id=\"browser-attestation-heading\">Browser attestation check</h3><p data-browser-attestation-summary>Generating a fresh browser challenge…</p></div><span class=\"browser-attestation-status\" data-browser-attestation-status>CHECKING</span></div><dl class=\"browser-attestation-details\" data-browser-attestation-pcrs hidden><div class=\"detail\"><dt>PCR0 · image</dt><dd><code data-browser-pcr=\"PCR0\"></code></dd></div><div class=\"detail\"><dt>PCR1 · kernel</dt><dd><code data-browser-pcr=\"PCR1\"></code></dd></div><div class=\"detail\"><dt>PCR2 · application</dt><dd><code data-browser-pcr=\"PCR2\"></code></dd></div></dl><div class=\"browser-attestation-actions\"><button type=\"button\" data-browser-attestation-retry>Check again</button><p>This same-origin browser check authenticates certificate signatures to the pinned AWS root, certificate dates, COSE ES384, and a fresh nonce. It does not perform full X.509 policy validation or compare independently supplied expected Canary PCR policy; use <code>canaryctl enroll</code> for the full check.</p></div></section>");
+        page.push_str("<section class=\"browser-attestation\" data-browser-attestation data-browser-attestation-state=\"idle\" aria-labelledby=\"browser-attestation-heading\"><div class=\"browser-attestation-head\"><div><h3 id=\"browser-attestation-heading\">Browser evidence check</h3><p data-browser-attestation-summary>Not run. Start this convenience check to request fresh Nitro evidence.</p></div><span class=\"browser-attestation-status\" data-browser-attestation-status>NOT RUN</span></div><dl class=\"browser-attestation-details\" data-browser-attestation-pcrs hidden><div class=\"detail\"><dt>PCR0 · image</dt><dd><code data-browser-pcr=\"PCR0\"></code></dd></div><div class=\"detail\"><dt>PCR1 · kernel</dt><dd><code data-browser-pcr=\"PCR1\"></code></dd></div><div class=\"detail\"><dt>PCR2 · application</dt><dd><code data-browser-pcr=\"PCR2\"></code></dd></div></dl><div class=\"browser-attestation-actions\"><button type=\"button\" data-browser-attestation-run>Run browser evidence check</button><p>This page and JavaScript are served by the same origin being checked. The check validates certificate signatures to the pinned AWS root, certificate dates, COSE ES384, and a fresh nonce. It does not perform full X.509 policy validation or compare independently supplied expected Canary PCR policy; use <code>canaryctl enroll</code> for the full independent check.</p></div></section>");
     }
     page.push_str(
         "<div class=\"self-check-boundary\"><strong>External verification required</strong><p>",
@@ -440,7 +430,7 @@ fn push_self_check(page: &mut String, snapshot: &RuntimeSnapshot) {
     } else {
         "Use the explicit insecure workflow only for development. It verifies signer continuity and target evidence, but the initial Canary identity and policy remain TOFU."
     });
-    page.push_str("</p><a href=\"#verify-heading\">Verification steps →</a></div></section>");
+    page.push_str("</p><a href=\"#verify-heading\">Independent verification ↑</a></div></section>");
 }
 
 fn push_verification_guide(
@@ -448,7 +438,7 @@ fn push_verification_guide(
     environment: ExecutionEnvironment,
     identity_mode: IdentityMode,
 ) {
-    page.push_str("<section class=\"verify-box\" aria-labelledby=\"verify-heading\"><div class=\"verify-box-head\"><h2 id=\"verify-heading\">Verify locally</h2></div>");
+    page.push_str("<section class=\"verify-box\" aria-labelledby=\"verify-heading\"><div class=\"verify-box-head\"><h2 id=\"verify-heading\">Verify independently</h2></div>");
     match environment {
         ExecutionEnvironment::NitroEnclave => {
             page.push_str("<p><strong>ATTESTED:</strong> Canary’s fresh Nitro evidence matched operator-supplied Canary PCR0/1/2 and bound its config and keys.</p><div class=\"verify-step\"><h3>1. Verify and enroll Canary’s keys</h3><p><code>canaryctl enroll</code> writes <code>canary-keys.json</code> only after fresh Canary attestation, expected PCR0/1/2, and the attested config/key binding all verify successfully.</p><div class=\"command-row\"><pre id=\"enroll-command\">caution verify --save-pcrs\n\n# Verifies fresh Canary attestation + expected PCR0/1/2, then writes the authenticated keys.\ncanaryctl enroll --url &lt;this-origin&gt; --pcrs .caution/trusted_hashes.json --keys canary-keys.json</pre><button class=\"copy-button\" type=\"button\" data-copy=\"#enroll-command\">Copy</button></div></div><div class=\"verify-step\"><h3>2. Verify every deployment</h3><div class=\"command-row\"><pre id=\"all-deployments-command\">canaryctl verify --url &lt;this-origin&gt; --pcrs .caution/trusted_hashes.json</pre><button class=\"copy-button\" type=\"button\" data-copy=\"#all-deployments-command\">Copy</button></div></div>");
@@ -488,15 +478,6 @@ fn environment_label(environment: ExecutionEnvironment) -> &'static str {
     match environment {
         ExecutionEnvironment::NitroEnclave => "Nitro enclave detected",
         ExecutionEnvironment::NonEnclave => "Non-enclave runtime",
-    }
-}
-
-fn trust_summary(environment: ExecutionEnvironment, identity_mode: IdentityMode) -> &'static str {
-    match (environment, identity_mode) {
-        (ExecutionEnvironment::NitroEnclave, IdentityMode::Stable) => "Use canaryctl to independently verify Canary and its deployments.",
-        (ExecutionEnvironment::NitroEnclave, IdentityMode::Ephemeral) => "Use canaryctl to independently verify Canary and its deployments. This ephemeral identity changes on restart.",
-        (ExecutionEnvironment::NonEnclave, IdentityMode::Stable) => "This local runtime uses TOFU: independently verify signed deployment results, but treat the first key enrollment as explicit trust.",
-        (ExecutionEnvironment::NonEnclave, IdentityMode::Ephemeral) => "This local runtime uses TOFU and an ephemeral identity: re-enroll after restart.",
     }
 }
 

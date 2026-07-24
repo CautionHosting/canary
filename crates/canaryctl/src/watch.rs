@@ -49,6 +49,14 @@ pub(crate) fn run(config: &WatchConfig, options: WatchOptions) -> Result<()> {
         .iter()
         .map(|target| target.id.clone())
         .collect::<Vec<_>>();
+    let initial = live_verify::run(
+        canary_url,
+        config.canary.pcrs.as_deref(),
+        options.insecure_canary,
+        &config.canary.keys,
+        &target_ids,
+    )
+    .context("validating watcher config against remote Canary")?;
     let mut machine = WatchMachine::new(config);
     let deliveries = DeliveryManager::new(config)?;
     let mut next_poll = Instant::now();
@@ -58,8 +66,19 @@ pub(crate) fn run(config: &WatchConfig, options: WatchOptions) -> Result<()> {
         if target_ids.len() == 1 { "" } else { "s" },
         canary_url
     );
+    deliveries.enqueue_events(machine.observe_verified(initial));
 
     loop {
+        next_poll = next_poll
+            .checked_add(Duration::from_secs(config.poll_interval_seconds))
+            .unwrap_or_else(Instant::now);
+        let now = Instant::now();
+        if next_poll > now {
+            thread::sleep(next_poll.duration_since(now));
+        } else {
+            next_poll = now;
+        }
+
         let events = match live_verify::run(
             canary_url,
             config.canary.pcrs.as_deref(),
@@ -74,16 +93,6 @@ pub(crate) fn run(config: &WatchConfig, options: WatchOptions) -> Result<()> {
 
         let heartbeat_events = machine.heartbeat_if_due();
         deliveries.enqueue_events(heartbeat_events);
-
-        next_poll = next_poll
-            .checked_add(Duration::from_secs(config.poll_interval_seconds))
-            .unwrap_or_else(Instant::now);
-        let now = Instant::now();
-        if next_poll > now {
-            thread::sleep(next_poll.duration_since(now));
-        } else {
-            next_poll = now;
-        }
     }
 }
 

@@ -588,3 +588,56 @@ fn tampered_target_signature_immediately_reports_canary_verification_failure() {
         body
     );
 }
+
+#[test]
+fn watch_rejects_a_target_missing_from_the_remote_canary_before_delivery() {
+    let directory = TempDir::new("missing-target");
+    let canary = MockCanary::start(&directory);
+    let receiver = LocalServer::start(|_| Response::ok_json(Vec::new()));
+    let secret_env = secret_env("MISSING");
+    let watcher_path = directory.join("canary-watch.json");
+    std::fs::write(
+        &watcher_path,
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "canary": {"url": canary.server.url(), "keys": "canary-keys.json"},
+            "poll_interval_seconds": 60,
+            "heartbeat_interval_seconds": 300,
+            "failure_threshold": 3,
+            "targets": [{
+                "id": "missing-target",
+                "webhooks": [{
+                    "id": "alerts",
+                    "url": receiver.url(),
+                    "secret_env": secret_env
+                }]
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_canaryctl"))
+        .args([
+            "watch",
+            "--config",
+            watcher_path.to_str().unwrap(),
+            "--insecure",
+        ])
+        .env(&secret_env, STANDARD.encode([0x77; 32]))
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("validating watcher config against remote Canary")
+            && stderr.contains("verified Canary config has no deployment \"missing-target\""),
+        "unexpected watcher error: {stderr}"
+    );
+    assert!(!stderr.contains("watching 1 target"));
+    assert!(
+        receiver.requests().is_empty(),
+        "invalid watcher config triggered a webhook"
+    );
+}

@@ -348,8 +348,10 @@ IwLz3/Y=
   );
   const tabs = [...dialog.querySelectorAll("[data-tab]")];
   const isNitroEnclave = document.body.dataset.runtimeEnvironment === "nitro_enclave";
+  const HISTORY_PAGE_SIZE = 25;
   const byId = (id) => document.getElementById(id);
   let currentDeployment = null;
+  let historyOffset = 0;
   let loadGeneration = 0;
 
   function deploymentPath(kind) {
@@ -474,14 +476,54 @@ IwLz3/Y=
     row.append(cell);
   }
 
-  function renderHistory(value) {
+  function appendHistoryPagination(output, offset, count, hasOlder) {
+    if (offset === 0 && !hasOlder) return;
+    const pagination = document.createElement("div");
+    pagination.className = "history-pagination";
+
+    const summary = document.createElement("span");
+    summary.textContent = count === 0
+      ? "No attempts on this page"
+      : `Attempts ${offset + 1}–${offset + count} · newest first`;
+    pagination.append(summary);
+
+    const actions = document.createElement("div");
+    const newer = document.createElement("button");
+    newer.className = "history-page-button";
+    newer.type = "button";
+    newer.dataset.historyOffset = String(Math.max(0, offset - HISTORY_PAGE_SIZE));
+    newer.textContent = "Newer";
+    newer.disabled = offset === 0;
+    actions.append(newer);
+
+    const older = document.createElement("button");
+    older.className = "history-page-button";
+    older.type = "button";
+    older.dataset.historyOffset = String(offset + HISTORY_PAGE_SIZE);
+    older.textContent = "Older";
+    older.disabled = !hasOlder;
+    actions.append(older);
+
+    pagination.append(actions);
+    output.append(pagination);
+  }
+
+  function renderHistory(value, offset) {
     const output = panels.get("history")?.querySelector("[data-artifact-output]");
     if (!output) return;
     output.dataset.state = "ready";
     output.replaceChildren();
-    const observations = Array.isArray(value?.observations) ? value.observations : [];
+    const returned = Array.isArray(value?.observations) ? value.observations : [];
+    const hasOlder = returned.length > HISTORY_PAGE_SIZE;
+    const observations = returned.slice(0, HISTORY_PAGE_SIZE);
     if (observations.length === 0) {
-      output.textContent = "No completed probe attempts are recorded for this process lifetime.";
+      const message = document.createElement("p");
+      message.className = "history-empty";
+      message.textContent = offset === 0
+        ? "No completed probe attempts are recorded for this process lifetime."
+        : "No retained attempts remain on this page.";
+      output.append(message);
+      appendHistoryPagination(output, offset, 0, false);
       return;
     }
 
@@ -525,6 +567,7 @@ IwLz3/Y=
     }
     table.append(body);
     output.append(table);
+    appendHistoryPagination(output, offset, observations.length, hasOlder);
   }
 
   function appendHistoryPcrCell(row, value, className) {
@@ -609,18 +652,23 @@ IwLz3/Y=
     }
   }
 
-  async function loadHistory() {
+  async function loadHistory(offset = historyOffset, force = false) {
     const panel = panels.get("history");
-    if (!panel || panel.dataset.loaded === "true" || !currentDeployment) return;
+    if (!panel || (!force && panel.dataset.loaded === "true") || !currentDeployment) return;
     const generation = loadGeneration;
+    panel.dataset.loaded = "loading";
     setHistoryState("Loading history…");
     try {
-      const value = await requestJson(deploymentPath("history"));
+      const value = await requestJson(
+        deploymentPath(`history?offset=${offset}&limit=${HISTORY_PAGE_SIZE + 1}`),
+      );
       if (generation !== loadGeneration) return;
-      renderHistory(value);
+      historyOffset = offset;
+      renderHistory(value, offset);
       panel.dataset.loaded = "true";
     } catch (error) {
       if (generation !== loadGeneration) return;
+      panel.dataset.loaded = "false";
       setHistoryState(error instanceof Error ? error.message : "Unable to load history.", "error");
     }
   }
@@ -632,6 +680,7 @@ IwLz3/Y=
 
   function openDeployment(card) {
     loadGeneration += 1;
+    historyOffset = 0;
     currentDeployment = {
       id: card.dataset.targetId,
       name: card.dataset.targetName,
@@ -705,6 +754,12 @@ IwLz3/Y=
     const historyClaimsButton = event.target.closest("[data-history-claims-attempt]");
     if (historyClaimsButton) {
       toggleHistoricalClaims(historyClaimsButton);
+      return;
+    }
+    const historyPageButton = event.target.closest("[data-history-offset]");
+    if (historyPageButton && !historyPageButton.disabled) {
+      const offset = Number(historyPageButton.dataset.historyOffset);
+      if (Number.isSafeInteger(offset) && offset >= 0) loadHistory(offset, true);
       return;
     }
     const copyButton = event.target.closest("[data-copy], [data-copy-text]");

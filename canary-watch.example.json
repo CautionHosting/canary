@@ -10,7 +10,7 @@
   "failure_threshold": 3,
   "targets": [
     {
-      "id": "pq-demo-hook",
+      "id": "pq-demo",
       "webhooks": [
         {
           "id": "pq-demo-hook",

@@ -330,14 +330,34 @@ impl Store {
     /// Return the newest bounded history for one target.  This query never
     /// selects raw evidence, nonce, or signature JSON.
     pub async fn history(&self, target_id: &str) -> Result<Vec<HistoryEntry>, StoreError> {
+        let limit =
+            u32::try_from(self.history_limit).map_err(|_| StoreError::InvalidHistoryLimit)?;
+        self.history_page(target_id, 0, limit).await
+    }
+
+    /// Return one newest-first page from the retained history for a target.
+    ///
+    /// The public UI uses this to avoid loading and rendering the complete
+    /// measured retention window. The unpaginated `history` method remains
+    /// available for the existing JSON API behavior.
+    pub async fn history_page(
+        &self,
+        target_id: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<HistoryEntry>, StoreError> {
+        if limit == 0 {
+            return Err(StoreError::InvalidHistoryLimit);
+        }
         let rows = sqlx::query(
             "SELECT id, target_id, attempted_at, observed_at, state, reason, attempt_reason, latency_ms,
                     evidence_digest, manifest_digest, config_digest, transport_warning
              FROM attempts WHERE target_id = ?
-             ORDER BY attempted_at DESC, id DESC LIMIT ?",
+             ORDER BY attempted_at DESC, id DESC LIMIT ? OFFSET ?",
         )
         .bind(target_id)
-        .bind(self.history_limit)
+        .bind(i64::from(limit))
+        .bind(i64::from(offset))
         .fetch_all(&self.pool)
         .await?;
 
@@ -937,6 +957,10 @@ mod tests {
         assert_eq!(one.len(), LIMIT as usize);
         assert_eq!(one.first().unwrap().attempted_at, at(100));
         assert_eq!(one.last().unwrap().attempted_at, at(1));
+        let page = store.history_page("one", 10, 5).await.unwrap();
+        assert_eq!(page.len(), 5);
+        assert_eq!(page.first().unwrap().attempted_at, at(90));
+        assert_eq!(page.last().unwrap().attempted_at, at(86));
         assert_eq!(store.history("two").await.unwrap().len(), 1);
     }
 

@@ -626,7 +626,10 @@ and demo evidence inspection; it is not a durable audit log.
 
 Each target retains and returns at most the measured `history_limit` most recent
 attempts; the default is 1,000. Pruning is per target and transactional with the new
-attempt and current-state update.
+attempt and current-state update. The status UI requests this retained history in
+25-row pages. `GET /targets/{id}/history` keeps returning the complete retained
+summary for compatibility; callers may request a smaller newest-first slice with
+`?offset=<nonnegative>&limit=<1..100>`.
 
 Raw evidence and its nonce may be returned by the evidence endpoint so a third party
 can re-run verification. They are not secrets, but the response must document that a

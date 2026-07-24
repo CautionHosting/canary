@@ -216,6 +216,12 @@ dialog::backdrop { background: rgba(1, 5, 8, .82); backdrop-filter: blur(5px); }
 .history-status-pending { color: var(--warning); }
 .history-actions { display: flex; align-items: center; gap: 8px; }
 .history-actions .copy-button { padding: 5px 7px; white-space: nowrap; }
+.history-empty { margin: 0; color: var(--muted); }
+.history-pagination { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 12px 0; color: var(--muted); white-space: normal; }
+.history-pagination > div { display: flex; gap: 8px; }
+.history-page-button { padding: 5px 9px; color: var(--accent); background: transparent; border: 1px solid var(--border); cursor: pointer; }
+.history-page-button:hover { color: var(--accent-bright); border-color: var(--border-strong); }
+.history-page-button:disabled { color: var(--muted); cursor: default; opacity: .55; }
 .history-claims-row > td { padding: 12px !important; background: rgba(99, 220, 255, .025); }
 .artifact-output .history-pcr-table { table-layout: fixed; white-space: normal; }
 .artifact-output .history-pcr-table td { font-size: 10px; overflow-wrap: anywhere; }

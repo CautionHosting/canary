@@ -11,7 +11,7 @@ use std::sync::{
 
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -32,6 +32,8 @@ use crate::{
     model::{HistoryEntry, RuntimeIdentity, RuntimeSnapshot, TargetSnapshot},
     store::Store,
 };
+
+const MAX_HISTORY_PAGE_SIZE: u32 = 100;
 
 /// Runtime-owned state that backs only the public read-only routes.
 ///
@@ -229,7 +231,11 @@ async fn evidence_claims(Path(id): Path<String>, State(state): State<ApiState>) 
     }
 }
 
-async fn history(Path(id): Path<String>, State(state): State<ApiState>) -> Response {
+async fn history(
+    Path(id): Path<String>,
+    Query(query): Query<HistoryQuery>,
+    State(state): State<ApiState>,
+) -> Response {
     if let Some(response) = not_ready(&state) {
         return response;
     }
@@ -237,7 +243,24 @@ async fn history(Path(id): Path<String>, State(state): State<ApiState>) -> Respo
     if target(&snapshot, &id).is_none() {
         return not_found_response();
     }
-    match state.store.history(&id).await {
+    let history = match (query.offset, query.limit) {
+        (None, None) => state.store.history(&id).await,
+        (offset, Some(limit)) if (1..=MAX_HISTORY_PAGE_SIZE).contains(&limit) => {
+            state
+                .store
+                .history_page(&id, offset.unwrap_or_default(), limit)
+                .await
+        }
+        _ => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "invalid_history_pagination",
+                },
+            );
+        }
+    };
+    match history {
         Ok(history) => json_response(
             StatusCode::OK,
             HistoryResponse {
@@ -472,6 +495,13 @@ impl From<&TargetSnapshot> for TargetSummary {
 struct HistoryResponse {
     target_id: String,
     observations: Vec<HistoryEntry>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistoryQuery {
+    offset: Option<u32>,
+    limit: Option<u32>,
 }
 
 /// Versioned derived view of the currently retained evidence bundle.
@@ -912,7 +942,9 @@ mod tests {
         assert!(script.contains("historyClaimsAttempt"));
         assert!(script.contains("history/${attemptId}/evidence/claims"));
         assert!(!script.contains("window.location.protocol"));
-        assert!(script.contains("requestJson(deploymentPath(\"history\"))"));
+        assert!(script
+            .contains("deploymentPath(`history?offset=${offset}&limit=${HISTORY_PAGE_SIZE + 1}`)"));
+        assert!(script.contains("const HISTORY_PAGE_SIZE = 25"));
         assert!(!script.contains("\\n+  --"));
         assert!(!script.contains("innerHTML"));
 
@@ -1036,7 +1068,8 @@ mod tests {
                 .unwrap();
         }
         state.set_ready(true);
-        let (status, _, body) = response(router(state), "/targets/target-a/history").await;
+        let app = router(state);
+        let (status, _, body) = response(app.clone(), "/targets/target-a/history").await;
         assert_eq!(status, StatusCode::OK);
         let value: Value = serde_json::from_slice(&body).unwrap();
         let history = value["observations"].as_array().unwrap();
@@ -1048,6 +1081,19 @@ mod tests {
         assert!(history[0].get("evidence").is_none());
         assert!(history[0].get("nonce").is_none());
         assert!(history[0].get("statement").is_none());
+
+        let (status, _, body) =
+            response(app.clone(), "/targets/target-a/history?offset=10&limit=5").await;
+        assert_eq!(status, StatusCode::OK);
+        let page: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            page["observations"].as_array().unwrap().as_slice(),
+            &history[10..15]
+        );
+
+        let (status, _, body) = response(app, "/targets/target-a/history?offset=10").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, br#"{"error":"invalid_history_pagination"}"#);
     }
 
     #[tokio::test]

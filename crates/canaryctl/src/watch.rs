@@ -772,6 +772,24 @@ mod tests {
     }
 
     #[test]
+    fn tls_binding_mismatch_emits_the_existing_immediate_status_event() {
+        let mut machine = machine();
+        machine.observe_target("alpha".to_owned(), observation("VERIFIED"));
+        let mut mismatch = observation("FAILED");
+        mismatch.reason = "TLS_BINDING_MISMATCH".to_owned();
+        mismatch.statement = json!({
+            "payload": {
+                "status": "FAILED",
+                "reason": "TLS_BINDING_MISMATCH"
+            }
+        });
+        let events = machine.observe_target("alpha".to_owned(), mismatch);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "target.status_changed");
+        assert_eq!(events[0].body["result"]["reason"], "TLS_BINDING_MISMATCH");
+    }
+
+    #[test]
     fn status_change_and_read_recovery_are_separate_events() {
         let mut machine = machine();
         machine.observe_target("alpha".to_owned(), observation("VERIFIED"));

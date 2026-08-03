@@ -121,6 +121,7 @@ fn preflight_config(
             id: id.to_string(),
             name: name.to_string(),
             attestation_url: attestation_url.to_string(),
+            e2e_mode: None,
             expected_pcrs: ExpectedPcrs {
                 pcr0: placeholder_pcr.clone(),
                 pcr1: placeholder_pcr.clone(),

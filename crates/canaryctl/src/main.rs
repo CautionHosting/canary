@@ -87,6 +87,9 @@ struct DeploymentAddArgs {
     /// Deployment Bootproof `/attestation` URL.
     #[arg(long = "url")]
     url: String,
+    /// Require enclave-terminated Caddy TLS to match signed attestation metadata.
+    #[arg(long, value_parser = ["caddy"], conflicts_with = "tofu")]
+    e2e_mode: Option<String>,
     /// Canary node ID, required only when creating a new config.
     #[arg(long)]
     canary_id: Option<String>,
@@ -235,19 +238,9 @@ fn execute(command: Command, json_mode: bool, verbose_mode: bool) -> Result<Outc
             }
             let name = args.name.as_deref().unwrap_or(&args.id);
             let (digest, mode, captured_pcrs) = match (args.pcrs.as_deref(), args.tofu) {
-                (Some(pcrs), false) => (
-                    config_add(
-                        &args.config,
-                        &args.id,
-                        name,
-                        &args.url,
-                        pcrs,
-                        args.canary_id.as_deref(),
-                        args.replace,
-                    )?,
-                    "trusted_pcrs",
-                    Value::Null,
-                ),
+                (Some(pcrs), false) => {
+                    (config_add(&args, name, pcrs)?, "trusted_pcrs", Value::Null)
+                }
                 (None, true) => {
                     let capture = capture::run(
                         &args.config,
@@ -287,7 +280,7 @@ fn execute(command: Command, json_mode: bool, verbose_mode: bool) -> Result<Outc
             Ok(Outcome {
                 command: "deployment.add",
                 ok: true,
-                result: json!({"deployment": args.id, "config": args.config, "mode": mode, "config_digest": digest, "captured_pcrs": captured_pcrs}),
+                result: json!({"deployment": args.id, "config": args.config, "mode": mode, "e2e_mode": args.e2e_mode, "config_digest": digest, "captured_pcrs": captured_pcrs}),
                 concise: format!(
                     "ADDED {} -> {} ({}){}",
                     args.id,
@@ -451,23 +444,19 @@ fn render_error(error: anyhow::Error, json_mode: bool, command: &'static str) ->
     ExitCode::FAILURE
 }
 
-fn config_add(
-    config_path: &Path,
-    id: &str,
-    name: &str,
-    attestation_url: &str,
-    pcrs_file: &Path,
-    node_id: Option<&str>,
-    replace: bool,
-) -> Result<String> {
+fn config_add(args: &DeploymentAddArgs, name: &str, pcrs_file: &Path) -> Result<String> {
     let pcrs = TrustedHashesFile::load(pcrs_file)?.into_expected_pcrs();
     let target = canary_core::config::Target {
-        id: id.to_string(),
+        id: args.id.clone(),
         name: name.to_string(),
-        attestation_url: attestation_url.to_string(),
+        attestation_url: args.url.clone(),
+        e2e_mode: args
+            .e2e_mode
+            .as_deref()
+            .map(|_| canary_core::config::E2eMode::Caddy),
         expected_pcrs: pcrs,
     };
-    let mut config = load_or_create_config(config_path, node_id)?;
-    upsert_target(&mut config, target, replace)?;
-    validate_and_write(config_path, &config)
+    let mut config = load_or_create_config(&args.config, args.canary_id.as_deref())?;
+    upsert_target(&mut config, target, args.replace)?;
+    validate_and_write(&args.config, &config)
 }

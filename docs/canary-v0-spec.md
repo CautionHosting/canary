@@ -45,7 +45,7 @@ does not expand the measured V0 service or its trust claim.
 | Configuration | Static `canary.json`, embedded in the measured image |
 | Attestation | Standard Bootproof HTTP API and `bootproof-sdk`; no direct NSM/Nitro driver calls |
 | Expected PCR enrollment | Independently verified PCRs preferred; explicit TOFU capture allowed for the POC |
-| Claim | One fixed, narrowly scoped V0 claim |
+| Claim | PCR-only V0 claim, plus an opt-in Caddy TLS-bound profile |
 | Signatures | One Caution signer producing required Ed25519 + ML-DSA-65 signatures |
 | Secret material | Stable: one random Locksmith-injected master seed. Ephemeral: one fresh process-local CSPRNG seed. Both use the same domain-separated child-key derivation |
 | Storage | Enclave-local SQLite under `/tmp`; wiped on enclave restart |
@@ -56,7 +56,7 @@ does not expand the measured V0 service or its trust claim.
 
 ## 3. Exact trust claim
 
-The only claim type is:
+The default claim type is:
 
 ```text
 caution.canary.pcr-match.v0
@@ -77,6 +77,16 @@ It does not mean:
 - The enclave remained unchanged between observations.
 - The measured application is correct, safe or healthy.
 - The history survived a Canary restart.
+
+For a target whose measured config contains `"e2e_mode":"caddy"`, the claim type is:
+
+```text
+caution.canary.caddy-tls-bound.v0
+```
+
+Its `VERIFIED` result additionally means authenticated `user_data.tls` named mode
+`caddy`, named the configured URL hostname, and contained the SHA-256 fingerprint of
+the leaf certificate observed on the exact TLS connection carrying `/attestation`.
 
 The statement is hybrid post-quantum signed, not “quantum-proof.” Nitro attestation
 currently relies on a classical AWS-rooted ES384 chain, so the upstream evidence is
@@ -185,6 +195,7 @@ The repository contains one canonical `canary.json`:
       "id": "payments-prod",
       "name": "Payments production",
       "attestation_url": "https://payments.example.com/attestation",
+      "e2e_mode": "caddy",
       "expected_pcrs": {
         "0": "<96 lowercase hex characters>",
         "1": "<96 lowercase hex characters>",
@@ -201,6 +212,9 @@ Rules:
 - `node_id` and target IDs are unique, stable ASCII identifiers.
 - At least one target is required; a practical V0 limit of 100 targets is sufficient.
 - URLs are absolute HTTPS URLs without credentials or fragments.
+- `e2e_mode` is optional. If present it is exactly `caddy`, requires a DNS hostname,
+  and cannot be enrolled through TOFU. Omission preserves the PCR-only profile and
+  serialized configuration.
 - PCR0/1/2 are present, SHA-384-sized, canonical lowercase hex and nonzero.
 - Unknown fields are rejected so misspellings do not silently weaken policy.
 - `probe_interval_seconds` is global, defaults to 60, and is in 6–86,400.
@@ -240,7 +254,17 @@ For each target, at the configured global probe interval, `canaryd`:
 
 4. Decodes `document` and verifies it with the verifier side of `bootproof-sdk`,
    equivalent to `Nitro::new(document, expected_pcrs).verify(now, nonce)`.
-5. Records the result and signs the new target statement.
+5. For a Caddy-profile target only, obtains the peer leaf DER from that same response
+   before consuming its body, then strictly checks authenticated `user_data.tls`:
+   mode is `caddy`, domain equals the configured URL hostname, and lowercase SHA-256
+   `certfp` equals SHA-256 of the observed leaf DER. Normal CA and hostname
+   verification remain enabled.
+6. Records the result and signs the new target statement.
+
+The Caddy check occurs only after the AWS chain, COSE signature, nonce, expected
+PCR0/1/2, and nonzero/debug checks pass. Missing, malformed, or unequal TLS metadata
+is a definitive `TLS_BINDING_MISMATCH`; it is not retried and has no certificate
+renewal grace period.
 
 The V0 evidence endpoint and offline verifier use this frozen bundle schema:
 
@@ -367,6 +391,11 @@ certificate-chain or nonce failures must state that authenticated PCRs are
 unavailable. Output must never substitute values decoded only from raw evidence, the
 unsigned manifest or configuration. These are CLI presentation requirements and do
 not change any signed or HTTP protocol format.
+
+For Caddy-profile targets, live verification requires the Caddy claim type, replays
+the same Nitro evidence and configured expected-PCR policy, then validates the signed
+TLS comparison. `artifact verify-evidence` remains PCR/attestation-only because an
+offline evidence bundle cannot observe the original TLS peer certificate.
 
 The live report must distinguish:
 
@@ -527,6 +556,24 @@ Envelope:
 }
 ```
 
+The PCR-only envelope is byte-for-byte unchanged. A Caddy-profile payload uses
+`caution.canary.caddy-tls-bound.v0` and may additionally contain this signed result:
+
+```json
+{
+  "tls": {
+    "attested_mode": "caddy",
+    "attested_domain": "payments.example.com",
+    "attested_certfp": "<64 lowercase hex>",
+    "observed_certfp": "<64 lowercase hex>"
+  }
+}
+```
+
+Successful Caddy claims require all four fields and an exact domain/fingerprint
+match. A `TLS_BINDING_MISMATCH` may omit `tls` when metadata or the peer certificate
+was unavailable or malformed; otherwise it retains the unequal values for diagnosis.
+
 V0 verification requires both signatures from the one attested Caution signer. The
 array shape permits future co-verifiers without changing the signed payload format.
 No customer approval signature is required in V0.
@@ -558,6 +605,7 @@ Probe reasons are stable machine-readable values, including:
 - `INVALID_SIGNATURE`
 - `NONCE_MISMATCH`
 - `MALFORMED_EVIDENCE`
+- `TLS_BINDING_MISMATCH`
 - `HTTP_ERROR`
 - `TIMEOUT`
 - `UNREACHABLE`
@@ -576,6 +624,9 @@ Target states:
 A reachable invalid response changes state to `FAILED` immediately. One successful
 probe recovers immediately; there is no two-success recovery rule in V0. A transport
 failure does not erase a still-fresh verified result, but it is exposed as a warning.
+In Caddy mode, `TLS_BINDING_MISMATCH` therefore immediately replaces even a fresh
+`VERIFIED` result and is visible to the existing external watcher. Traffic quarantine
+is an operator action outside Canary.
 
 State precedence is fresh definitive failure, fresh definitive success, persistent
 transport outage, then stale. This makes failures immediate without preserving an old
@@ -771,6 +822,9 @@ canaryctl deployment add \
   --name "Payments production" \
   --url https://payments.example.com/attestation \
   --pcrs .caution/trusted_hashes.json
+
+# Add --e2e-mode caddy above for the opt-in Caddy TLS-bound profile.
+# Caddy mode deliberately has no TOFU path.
 
 # 2b. Or, for the fast POC path only, enroll a TOFU baseline.
 canaryctl deployment add \

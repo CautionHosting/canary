@@ -135,6 +135,68 @@ fn deployment_add_refuses_silent_replacement_and_allows_explicit_replace() {
 }
 
 #[test]
+fn deployment_add_accepts_only_caddy_with_independently_supplied_pcrs() {
+    let dir = TempDir::new("caddy-config");
+    let config = dir.join("canary.json");
+    let pcrs = dir.join("trusted_hashes.json");
+    write_trusted_pcrs(&pcrs);
+
+    let added = run(&[
+        "deployment",
+        "add",
+        "--config",
+        path_arg(&config),
+        "--canary-id",
+        "caution-canary-demo",
+        "--id",
+        "payments-prod",
+        "--url",
+        "https://payments.example.com/attestation",
+        "--e2e-mode",
+        "caddy",
+        "--pcrs",
+        path_arg(&pcrs),
+    ]);
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    assert_eq!(saved["targets"][0]["e2e_mode"], "caddy");
+
+    let unknown = run(&[
+        "deployment",
+        "add",
+        "--id",
+        "other",
+        "--url",
+        "https://other.example.com/attestation",
+        "--e2e-mode",
+        "steve",
+        "--pcrs",
+        path_arg(&pcrs),
+    ]);
+    assert!(!unknown.status.success());
+
+    let tofu = run(&[
+        "deployment",
+        "add",
+        "--id",
+        "other",
+        "--url",
+        "https://other.example.com/attestation",
+        "--e2e-mode",
+        "caddy",
+        "--tofu",
+        "--accept-tofu",
+    ]);
+    assert!(!tofu.status.success());
+    assert!(String::from_utf8_lossy(&tofu.stderr).contains("cannot be used with"));
+}
+
+#[test]
 fn identity_create_process_enforces_nonoverwrite_and_permissions() {
     let dir = TempDir::new("seed");
     let env_file = dir.join(".env");
@@ -186,6 +248,7 @@ fn offline_statement_verification_round_trips_through_cli_process() {
             reason: "ALL_CHECKS_PASSED".to_string(),
             config_digest: format!("sha256:{}", "a".repeat(64)),
             evidence_digest: Some(format!("sha256:{}", "b".repeat(64))),
+            tls: None,
             observed_at: Some(timestamp.clone()),
             issued_at: timestamp,
             expires_at: (issued + chrono::Duration::seconds(180))

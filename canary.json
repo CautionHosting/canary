@@ -5,12 +5,13 @@
   "history_limit": 1000,
   "targets": [
     {
-      "id": "pq-demo",
-      "name": "PQ Demo",
-      "attestation_url": "https://pq-ceremony.kobl.one/attestation",
+      "id": "caddy-poc",
+      "name": "Caddy POC",
+      "attestation_url": "https://caddy-poc.kobl.one/attestation",
+      "e2e_mode": "caddy",
       "expected_pcrs": {
-        "0": "eff2b376e5cb770ab715a516393a5e039174ce3b2e9c99dca5c3c14de1bb735bc5e6fdcaadf5f4dc61bc9bd1039465d9",
-        "1": "eff2b376e5cb770ab715a516393a5e039174ce3b2e9c99dca5c3c14de1bb735bc5e6fdcaadf5f4dc61bc9bd1039465d9",
+        "0": "e0c2eccfc293b0bc22e1e83e46d6784bb26ebad44bc4909591827f72d588e12f1f84b112c2a3c72b5f4635f194a7955a",
+        "1": "e0c2eccfc293b0bc22e1e83e46d6784bb26ebad44bc4909591827f72d588e12f1f84b112c2a3c72b5f4635f194a7955a",
         "2": "21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a"
       }
     }

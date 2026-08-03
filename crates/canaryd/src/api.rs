@@ -649,7 +649,8 @@ mod tests {
         evidence::{AuthenticatedPcrClaims, EvidenceBundle, PcrMatches, PcrValues},
         keys::{KeyEntry, KeysDocument},
         node::ConfigDocument,
-        statement::{Payload, Signature, Signer, Statement, Status},
+        statement::{Payload, Signature, Signer, Statement, Status, CADDY_CLAIM_TYPE},
+        tls_binding::TlsBindingResult,
     };
     use chrono::{Duration, TimeZone, Utc};
     use http_body_util::BodyExt as _;
@@ -685,6 +686,7 @@ mod tests {
                 id: "target-a".to_owned(),
                 name: "Target A".to_owned(),
                 attestation_url: "https://example.test/attestation".to_owned(),
+                e2e_mode: None,
                 expected_pcrs: ExpectedPcrs {
                     pcr0: "a".repeat(96),
                     pcr1: "b".repeat(96),
@@ -718,6 +720,7 @@ mod tests {
                 reason: "ALL_CHECKS_PASSED".to_owned(),
                 config_digest: digest('a'),
                 evidence_digest: Some(digest('b')),
+                tls: None,
                 observed_at: Some("2023-11-14T22:13:20Z".to_owned()),
                 issued_at: "2023-11-14T22:13:20Z".to_owned(),
                 expires_at: "2023-11-14T22:16:20Z".to_owned(),
@@ -951,6 +954,29 @@ mod tests {
         let (status, _, body) = response(router(state), "/health").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, br#"{"status":"ok"}"#);
+    }
+
+    #[tokio::test]
+    async fn caddy_target_is_tagged_and_exposes_its_signed_certificate_comparison() {
+        let mut caddy = target(Some(evidence()));
+        caddy.target_origin = "https://caddy-poc.kobl.one".to_owned();
+        caddy.statement.payload.target_origin = caddy.target_origin.clone();
+        caddy.statement.payload.claim_type = CADDY_CLAIM_TYPE.to_owned();
+        caddy.statement.payload.tls = Some(TlsBindingResult {
+            attested_mode: "caddy".to_owned(),
+            attested_domain: "caddy-poc.kobl.one".to_owned(),
+            attested_certfp: "a".repeat(64),
+            observed_certfp: "b".repeat(64),
+        });
+        let page = crate::html::render_status_page(&snapshot(caddy));
+
+        assert!(page.contains("data-target-profile=\"caddy\""));
+        assert!(page.contains("E2E · CADDY"));
+        assert!(page.contains("data-tls-attested-certfp=\"aaaaaaaa"));
+        assert!(page.contains("data-tls-observed-certfp=\"bbbbbbbb"));
+        assert!(page.contains("Observed TLS cert SHA-256"));
+        assert!(crate::html::UI_SCRIPT.contains("openssl s_client"));
+        assert!(crate::html::UI_SCRIPT.contains("-servername ${hostname}"));
     }
 
     #[tokio::test]

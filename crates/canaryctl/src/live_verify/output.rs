@@ -2,7 +2,12 @@
 
 use std::fmt::Write as _;
 
-use canary_core::{config::Target, evidence::AuthenticatedPcrClaims, statement::Status};
+use canary_core::{
+    config::Target,
+    evidence::AuthenticatedPcrClaims,
+    statement::{Status, CADDY_CLAIM_TYPE},
+    tls_binding::TLS_BINDING_MISMATCH_REASON,
+};
 use serde_json::{json, Value};
 
 use crate::inspect::NodeTrust;
@@ -39,7 +44,14 @@ impl VerificationOutcome {
         );
         for deployment in &self.deployments {
             let detail = if deployment.status_text() == "VERIFIED" {
-                "PCR0/1/2 + signatures"
+                match deployment {
+                    DeploymentResult::Verified(result)
+                        if result.statement.payload.claim_type == CADDY_CLAIM_TYPE =>
+                    {
+                        "PCR0/1/2 + TLS binding + signatures"
+                    }
+                    _ => "PCR0/1/2 + signatures",
+                }
             } else {
                 deployment.reason()
             };
@@ -54,6 +66,7 @@ impl VerificationOutcome {
             match deployment {
                 DeploymentResult::Verified(result) => {
                     write_concise_pcrs(&mut output, result.pcr_claims.as_ref());
+                    write_concise_tls(&mut output, &result.statement);
                 }
                 DeploymentResult::ReadError(_) | DeploymentResult::VerificationError(_) => {
                     write!(output, "\n  Authenticated PCRs UNAVAILABLE").unwrap();
@@ -73,6 +86,11 @@ impl VerificationOutcome {
                 "id": deployment.id(),
                 "status": deployment.status_text(),
                 "reason": deployment.reason(),
+                "tls": match deployment {
+                    DeploymentResult::Verified(result) => serde_json::to_value(&result.statement.payload.tls)
+                        .expect("TLS result is serializable"),
+                    DeploymentResult::ReadError(_) | DeploymentResult::VerificationError(_) => Value::Null,
+                },
                 "pcrs": match deployment {
                     DeploymentResult::Verified(result) => pcrs_json(result.pcr_claims.as_ref()),
                     DeploymentResult::ReadError(_) | DeploymentResult::VerificationError(_) => Value::Null,
@@ -175,6 +193,7 @@ pub(super) fn target_report_text(
         writeln!(output, "  Deployment Nitro + PCRs NOT CHECKED").unwrap();
     }
     write_verbose_pcrs(&mut output, report.pcr_claims.as_ref());
+    write_tls_binding(&mut output, &report.statement);
     writeln!(
         output,
         "  Signed status           {}",
@@ -224,6 +243,7 @@ pub(super) fn historical_attempt_text(
     )
     .unwrap();
     write_verbose_pcrs(&mut output, report.pcr_claims.as_ref());
+    write_tls_binding(&mut output, &report.statement);
     writeln!(
         output,
         "  Signed status           {}",
@@ -259,6 +279,44 @@ fn write_concise_pcrs(output: &mut String, claims: Option<&AuthenticatedPcrClaim
     }
 }
 
+fn write_concise_tls(output: &mut String, statement: &canary_core::statement::Statement) {
+    if statement.payload.claim_type != CADDY_CLAIM_TYPE {
+        return;
+    }
+    let Some(tls) = statement.payload.tls.as_ref() else {
+        write!(
+            output,
+            "\n  TLS binding {}",
+            if statement.payload.reason == TLS_BINDING_MISMATCH_REASON {
+                "MISMATCH — certificate details unavailable"
+            } else {
+                "NOT EVALUATED"
+            }
+        )
+        .unwrap();
+        return;
+    };
+    let matched = statement.payload.status == Status::Verified;
+    write!(
+        output,
+        "\n  TLS {} {} {}",
+        tls.attested_mode,
+        tls.attested_domain,
+        if matched { "PASS" } else { "MISMATCH" }
+    )
+    .unwrap();
+    if matched {
+        write!(output, "\n    cert sha256:{}", tls.observed_certfp).unwrap();
+    } else {
+        write!(
+            output,
+            "\n    attested sha256:{}\n    observed sha256:{}",
+            tls.attested_certfp, tls.observed_certfp
+        )
+        .unwrap();
+    }
+}
+
 fn write_verbose_pcrs(output: &mut String, claims: Option<&AuthenticatedPcrClaims>) {
     let Some(claims) = claims else {
         writeln!(output, "  Authenticated PCRs      UNAVAILABLE").unwrap();
@@ -275,6 +333,40 @@ fn write_verbose_pcrs(output: &mut String, claims: Option<&AuthenticatedPcrClaim
         )
         .unwrap();
     }
+}
+
+fn write_tls_binding(output: &mut String, statement: &canary_core::statement::Statement) {
+    if statement.payload.claim_type != CADDY_CLAIM_TYPE {
+        return;
+    }
+    if statement.payload.reason != "ALL_CHECKS_PASSED"
+        && statement.payload.reason != TLS_BINDING_MISMATCH_REASON
+    {
+        writeln!(output, "  TLS/attestation binding NOT EVALUATED").unwrap();
+        return;
+    }
+    let Some(tls) = statement.payload.tls.as_ref() else {
+        writeln!(
+            output,
+            "  TLS/attestation binding MISMATCH — NO USABLE COMPARISON"
+        )
+        .unwrap();
+        return;
+    };
+    writeln!(
+        output,
+        "  TLS/attestation binding {}",
+        if statement.payload.status == Status::Verified {
+            "PASS"
+        } else {
+            "MISMATCH"
+        }
+    )
+    .unwrap();
+    writeln!(output, "  Attested mode           {}", tls.attested_mode).unwrap();
+    writeln!(output, "  Attested domain         {}", tls.attested_domain).unwrap();
+    writeln!(output, "  Attested certfp         {}", tls.attested_certfp).unwrap();
+    writeln!(output, "  Observed certfp         {}", tls.observed_certfp).unwrap();
 }
 
 fn pcrs_json(claims: Option<&AuthenticatedPcrClaims>) -> Value {

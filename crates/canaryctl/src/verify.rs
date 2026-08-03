@@ -142,6 +142,7 @@ mod tests {
             reason: "ALL_CHECKS_PASSED".to_string(),
             config_digest: format!("sha256:{}", "a".repeat(64)),
             evidence_digest: Some(format!("sha256:{}", "b".repeat(64))),
+            tls: None,
             observed_at: Some(observed_at.to_string()),
             issued_at: observed_at.to_string(),
             expires_at: expires_at.to_string(),

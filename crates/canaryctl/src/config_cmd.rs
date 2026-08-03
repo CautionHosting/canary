@@ -116,6 +116,7 @@ mod tests {
             id: id.to_string(),
             name: "Payments production".to_string(),
             attestation_url: "https://payments.example.com/attestation".to_string(),
+            e2e_mode: None,
             expected_pcrs: ExpectedPcrs {
                 pcr0: valid_pcr(0xaa),
                 pcr1: valid_pcr(0xbb),

@@ -54,7 +54,16 @@ pub struct Target {
     pub id: String,
     pub name: String,
     pub attestation_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e2e_mode: Option<E2eMode>,
     pub expected_pcrs: ExpectedPcrs,
+}
+
+/// Optional verification performed in addition to normal Nitro/PCR policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum E2eMode {
+    Caddy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -113,6 +122,8 @@ pub enum ConfigError {
     UrlHasFragment { target_id: String },
     #[error("target {target_id:?} attestation_url must use https")]
     NotHttps { target_id: String },
+    #[error("target {target_id:?} with e2e_mode=caddy requires a DNS hostname")]
+    CaddyRequiresDomain { target_id: String },
     #[error("target {target_id:?} PCR{pcr} has wrong length {len}, expected {PCR_HEX_LEN}")]
     BadPcrLength {
         target_id: String,
@@ -181,6 +192,14 @@ pub fn validate_attestation_url(target_id: &str, raw: &str) -> Result<(), Config
     Ok(())
 }
 
+/// Return the URL-normalized DNS hostname, rejecting IP literals.
+pub fn dns_hostname(raw_url: &str) -> Option<String> {
+    match Url::parse(raw_url).ok()?.host()? {
+        url::Host::Domain(domain) => Some(domain.to_owned()),
+        url::Host::Ipv4(_) | url::Host::Ipv6(_) => None,
+    }
+}
+
 impl Config {
     /// Validate this config against every rule in spec §6.
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -217,6 +236,13 @@ impl Config {
             }
 
             validate_attestation_url(&target.id, &target.attestation_url)?;
+            if target.e2e_mode == Some(E2eMode::Caddy)
+                && dns_hostname(&target.attestation_url).is_none()
+            {
+                return Err(ConfigError::CaddyRequiresDomain {
+                    target_id: target.id.clone(),
+                });
+            }
 
             for index in PCR_INDICES {
                 validate_pcr(&target.id, index, target.expected_pcrs.get(index))?;
@@ -281,6 +307,38 @@ mod tests {
         );
         assert_eq!(config.history_limit, DEFAULT_HISTORY_LIMIT);
         assert_eq!(config.targets.len(), 1);
+        assert_eq!(config.targets[0].e2e_mode, None);
+        assert!(!serde_json::to_string(&config).unwrap().contains("e2e_mode"));
+    }
+
+    #[test]
+    fn caddy_mode_is_additive_and_requires_a_dns_hostname() {
+        let mut json = valid_config_json();
+        json["targets"][0]["e2e_mode"] = serde_json::json!("caddy");
+        let config = parse_and_validate(&json.to_string()).unwrap();
+        assert_eq!(config.targets[0].e2e_mode, Some(E2eMode::Caddy));
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["targets"][0]["e2e_mode"],
+            "caddy"
+        );
+
+        json["targets"][0]["attestation_url"] =
+            serde_json::json!("https://203.0.113.1/attestation");
+        let config: Config = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            config.validate().unwrap_err(),
+            ConfigError::CaddyRequiresDomain {
+                target_id: "payments-prod".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_e2e_mode_is_rejected() {
+        let mut json = valid_config_json();
+        json["targets"][0]["e2e_mode"] = serde_json::json!("steve");
+        let error = serde_json::from_value::<Config>(json).unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
     }
 
     #[test]

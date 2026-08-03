@@ -374,8 +374,35 @@ IwLz3/Y=
     return `canaryctl verify \\\n  --url ${window.location.origin} \\\n  ${trust}${deployment}${attempt}`;
   }
 
+  function certificateCommand(origin) {
+    const target = new URL(origin);
+    const hostname = target.hostname;
+    return `openssl s_client \\\n  -connect ${hostname}:${target.port || "443"} \\\n  -servername ${hostname} \\\n  -verify_return_error </dev/null 2>/dev/null |\nopenssl x509 -outform DER |\nshasum -a 256`;
+  }
+
   function setCommand(element, deploymentId) {
     if (element) element.textContent = verificationCommand(deploymentId);
+  }
+
+  function renderCaddyBinding() {
+    const panel = dialog.querySelector("[data-caddy-binding]");
+    const isCaddy = currentDeployment.profile === "caddy";
+    panel.hidden = !isCaddy;
+    if (!isCaddy) return;
+
+    const evaluated = currentDeployment.reason === "ALL_CHECKS_PASSED"
+      || currentDeployment.reason === "TLS_BINDING_MISMATCH";
+    panel.dataset.state = currentDeployment.status === "VERIFIED"
+      ? "verified"
+      : evaluated ? "failed" : "idle";
+    panel.querySelector("[data-caddy-status]").textContent = currentDeployment.status === "VERIFIED"
+      ? "BOUND"
+      : evaluated ? "MISMATCH" : "NOT EVALUATED";
+    panel.querySelector("[data-caddy-mode]").textContent = currentDeployment.tlsMode || "Unavailable";
+    panel.querySelector("[data-caddy-domain]").textContent = currentDeployment.tlsDomain || "Unavailable";
+    panel.querySelector("[data-caddy-attested-certfp]").textContent = currentDeployment.tlsAttestedCertfp || "Unavailable";
+    panel.querySelector("[data-caddy-observed-certfp]").textContent = currentDeployment.tlsObservedCertfp || "Unavailable";
+    byId("caddy-certificate-command").textContent = certificateCommand(currentDeployment.origin);
   }
 
   function setActiveTab(name) {
@@ -690,6 +717,11 @@ IwLz3/Y=
       observed: card.dataset.targetObserved || "—",
       expires: card.dataset.targetExpires,
       warning: card.dataset.targetWarning || "None",
+      profile: card.dataset.targetProfile || "",
+      tlsMode: card.dataset.tlsMode || "",
+      tlsDomain: card.dataset.tlsDomain || "",
+      tlsAttestedCertfp: card.dataset.tlsAttestedCertfp || "",
+      tlsObservedCertfp: card.dataset.tlsObservedCertfp || "",
     };
 
     byId("inspector-kicker").textContent = currentDeployment.id;
@@ -701,6 +733,7 @@ IwLz3/Y=
     byId("inspector-observed").textContent = currentDeployment.observed;
     byId("inspector-expires").textContent = currentDeployment.expires;
     byId("inspector-warning").textContent = currentDeployment.warning;
+    renderCaddyBinding();
     setCommand(byId("deployment-command"), currentDeployment.id);
     setLink("statement-json-link", "statement");
     setLink("evidence-json-link", "evidence");

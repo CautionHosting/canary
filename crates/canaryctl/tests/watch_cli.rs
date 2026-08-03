@@ -228,6 +228,7 @@ impl MockCanary {
                 reason: "STARTUP_PENDING".to_owned(),
                 config_digest: document.config_digest.clone(),
                 evidence_digest: None,
+                tls: None,
                 observed_at: None,
                 issued_at: issued.to_rfc3339_opts(SecondsFormat::Secs, true),
                 expires_at: (issued + chrono::Duration::seconds(180))

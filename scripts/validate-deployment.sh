@@ -100,7 +100,9 @@ jq -e '
   (.targets | type == "array" and length >= 2) and
   all(.targets[];
     type == "object" and
-    (keys | sort) == ["attestation_url", "expected_pcrs", "id", "name"] and
+    ((keys | sort) == ["attestation_url", "expected_pcrs", "id", "name"] or
+     (keys | sort) == ["attestation_url", "e2e_mode", "expected_pcrs", "id", "name"]) and
+    (.e2e_mode == null or .e2e_mode == "caddy") and
     (.expected_pcrs | type == "object" and (keys | sort) == ["0", "1", "2"])
   )
 ' "$CONFIG" >/dev/null || die "canary.json has the wrong V0 shape or fewer than two targets"
@@ -136,6 +138,11 @@ origin_count="$(jq -r '
 first_id="$(jq -r '.targets[0].id' "$CONFIG")"
 first_name="$(jq -r '.targets[0].name' "$CONFIG")"
 first_url="$(jq -r '.targets[0].attestation_url' "$CONFIG")"
+first_e2e_mode="$(jq -r '.targets[0].e2e_mode // empty' "$CONFIG")"
+e2e_args=()
+if [[ "$first_e2e_mode" == "caddy" ]]; then
+  e2e_args=(--e2e-mode caddy)
+fi
 cp "$CONFIG" "$tmp_dir/canary.json"
 jq '{pcr0: .targets[0].expected_pcrs["0"], pcr1: .targets[0].expected_pcrs["1"], pcr2: .targets[0].expected_pcrs["2"]}' \
   "$CONFIG" >"$tmp_dir/pcrs.json"
@@ -146,6 +153,7 @@ jq '{pcr0: .targets[0].expected_pcrs["0"], pcr1: .targets[0].expected_pcrs["1"],
     --id "$first_id" \
     --name "$first_name" \
     --url "$first_url" \
+    "${e2e_args[@]}" \
     --pcrs "$tmp_dir/pcrs.json" \
     --replace >/dev/null
 ) || die "canaryctl rejected canary.json"

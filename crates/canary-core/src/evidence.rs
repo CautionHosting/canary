@@ -42,6 +42,7 @@ pub enum ProbeReason {
     InvalidSignature,
     NonceMismatch,
     MalformedEvidence,
+    TlsBindingMismatch,
     /// Set by the `canaryd` HTTP layer, not by this module.
     HttpError,
     /// Set by the `canaryd` HTTP layer, not by this module.
@@ -62,6 +63,7 @@ impl ProbeReason {
             ProbeReason::InvalidSignature => "INVALID_SIGNATURE",
             ProbeReason::NonceMismatch => "NONCE_MISMATCH",
             ProbeReason::MalformedEvidence => "MALFORMED_EVIDENCE",
+            ProbeReason::TlsBindingMismatch => "TLS_BINDING_MISMATCH",
             ProbeReason::HttpError => "HTTP_ERROR",
             ProbeReason::Timeout => "TIMEOUT",
             ProbeReason::Unreachable => "UNREACHABLE",
@@ -754,6 +756,7 @@ mod tests {
             (ProbeReason::InvalidSignature, "\"INVALID_SIGNATURE\""),
             (ProbeReason::NonceMismatch, "\"NONCE_MISMATCH\""),
             (ProbeReason::MalformedEvidence, "\"MALFORMED_EVIDENCE\""),
+            (ProbeReason::TlsBindingMismatch, "\"TLS_BINDING_MISMATCH\""),
             (ProbeReason::HttpError, "\"HTTP_ERROR\""),
             (ProbeReason::Timeout, "\"TIMEOUT\""),
             (ProbeReason::Unreachable, "\"UNREACHABLE\""),

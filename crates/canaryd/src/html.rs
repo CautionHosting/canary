@@ -4,7 +4,7 @@
 //! fetches read-only artifacts and performs an explicit, nonce-bound
 //! browser-side verification of Canary's own Nitro attestation when available.
 
-use canary_core::node::IdentityMode;
+use canary_core::{node::IdentityMode, statement::CADDY_CLAIM_TYPE};
 
 use crate::model::{ExecutionEnvironment, RuntimeSnapshot};
 
@@ -152,6 +152,7 @@ h1 { margin: 0; color: #f2f8fa; font-size: clamp(34px, 5vw, 54px); font-weight: 
 .target-id { display: block; margin-bottom: 4px; color: var(--muted); font-size: 11px; }
 .target-header h3 { margin: 0; color: #f0f6f8; font-size: 18px; font-weight: 550; line-height: 1.25; }
 .header-actions { display: flex; align-items: center; gap: 10px; }
+.profile-badge { flex: 0 0 auto; padding: 5px 8px; color: var(--accent); background: var(--accent-soft); border: 1px solid rgba(99, 220, 255, .28); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
 .status-badge { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; padding: 5px 8px; color: var(--status-color, var(--muted)); background: color-mix(in srgb, var(--status-color, var(--muted)) 12%, transparent); border: 1px solid color-mix(in srgb, var(--status-color, var(--muted)) 42%, transparent); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
 .status-badge::before { content: ""; width: 6px; height: 6px; background: currentColor; border-radius: 50%; box-shadow: 0 0 9px currentColor; }
 .open-target { padding: 6px 8px; color: var(--accent); border: 1px solid rgba(99, 220, 255, .25); font-size: 11px; }
@@ -191,7 +192,10 @@ dialog::backdrop { background: rgba(1, 5, 8, .82); backdrop-filter: blur(5px); }
 .pcr-panel p { margin: 0; color: var(--muted); font-size: 11px; }
 .pcr-panel-status { flex: 0 0 auto; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
 .pcr-panel[data-state="verified"] .pcr-panel-status { color: var(--success); }
+.pcr-panel[data-state="failed"] .pcr-panel-status { color: var(--danger); }
 .pcr-panel[data-state="unavailable"] .pcr-panel-status, .pcr-panel[data-state="error"] .pcr-panel-status { color: var(--warning); }
+.pcr-panel .inspector-details { margin: 16px 0; }
+.pcr-panel .panel-verify { margin: 0; }
 .pcr-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .pcr-table th, .pcr-table td { padding: 8px 9px; text-align: left; vertical-align: top; border-top: 1px solid var(--border); }
 .pcr-table th { color: var(--muted); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
@@ -290,6 +294,16 @@ const INSPECTOR: &str = r##"</main>
           </tbody>
         </table>
       </section>
+      <section class="pcr-panel" data-caddy-binding data-state="idle" hidden>
+        <div class="pcr-panel-head"><div><h3>Caddy TLS certificate binding</h3><p>The signed attestation metadata is compared with the leaf certificate from the same HTTPS response.</p></div><span class="pcr-panel-status" data-caddy-status></span></div>
+        <dl class="inspector-details">
+          <div class="detail"><dt>Attested mode</dt><dd><code data-caddy-mode></code></dd></div>
+          <div class="detail"><dt>Attested domain</dt><dd><code data-caddy-domain></code></dd></div>
+          <div class="detail detail--wide"><dt>Attested certificate SHA-256</dt><dd><code data-caddy-attested-certfp></code></dd></div>
+          <div class="detail detail--wide"><dt>Observed certificate SHA-256</dt><dd><code data-caddy-observed-certfp></code></dd></div>
+        </dl>
+        <div class="panel-verify"><h3>Check the current HTTPS certificate</h3><div class="command-row"><pre id="caddy-certificate-command"></pre><button class="copy-button" type="button" data-copy="#caddy-certificate-command">Copy</button></div></div>
+      </section>
       <div class="panel-verify deployment-command-box"><h3>Verify this deployment locally</h3><div class="command-row"><pre id="deployment-command"></pre><button class="copy-button" type="button" data-copy="#deployment-command">Copy</button></div></div>
       <div class="panel-links"><a class="raw-link" id="statement-json-link" href="#">Statement JSON</a><a class="raw-link" id="evidence-json-link" href="#">Raw evidence JSON</a><a class="raw-link" id="evidence-claims-json-link" href="#">Decoded claims JSON</a></div>
     </section>
@@ -321,6 +335,8 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
     page.push_str("</span></div><div class=\"targets\">");
 
     for target in &snapshot.targets {
+        let is_caddy = target.statement.payload.claim_type == CADDY_CLAIM_TYPE;
+        let tls = target.statement.payload.tls.as_ref();
         page.push_str("<article class=\"target-card ");
         page.push_str(status_class(target.status));
         page.push_str("\" data-target-id=\"");
@@ -343,11 +359,33 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
         if let Some(warning) = &target.transport_warning {
             push_escaped(&mut page, warning);
         }
+        if is_caddy {
+            page.push_str("\" data-target-profile=\"caddy\" data-tls-mode=\"");
+            if let Some(tls) = tls {
+                push_escaped(&mut page, &tls.attested_mode);
+            }
+            page.push_str("\" data-tls-domain=\"");
+            if let Some(tls) = tls {
+                push_escaped(&mut page, &tls.attested_domain);
+            }
+            page.push_str("\" data-tls-attested-certfp=\"");
+            if let Some(tls) = tls {
+                push_escaped(&mut page, &tls.attested_certfp);
+            }
+            page.push_str("\" data-tls-observed-certfp=\"");
+            if let Some(tls) = tls {
+                push_escaped(&mut page, &tls.observed_certfp);
+            }
+        }
         page.push_str("\"><header class=\"target-header\"><div><span class=\"target-id\">");
         push_escaped(&mut page, &target.id);
         page.push_str("</span><h3>");
         push_escaped(&mut page, &target.name);
-        page.push_str("</h3></div><div class=\"header-actions\"><span class=\"status-badge ");
+        page.push_str("</h3></div><div class=\"header-actions\">");
+        if is_caddy {
+            page.push_str("<span class=\"profile-badge\">E2E · CADDY</span>");
+        }
+        page.push_str("<span class=\"status-badge ");
         page.push_str(status_class(target.status));
         page.push_str("\">");
         push_escaped(&mut page, status_text(target.status));
@@ -362,6 +400,13 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
         page.push_str("</dd></div><div class=\"detail\"><dt>Valid until</dt><dd>");
         push_escaped(&mut page, &target.expires_at.to_rfc3339());
         page.push_str("</dd></div>");
+        if let Some(tls) = tls {
+            page.push_str(
+                "<div class=\"detail detail--wide\"><dt>Observed TLS cert SHA-256</dt><dd><code>",
+            );
+            push_escaped(&mut page, &tls.observed_certfp);
+            page.push_str("</code></dd></div>");
+        }
         if target.status != canary_core::statement::Status::Verified {
             page.push_str(
                 "<div class=\"detail detail--wide transport-warning\"><dt>Result</dt><dd><code>",

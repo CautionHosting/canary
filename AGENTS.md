@@ -4,7 +4,7 @@ Guidance for AI agents working in the Caution Canary repository.
 
 ## What this project is
 
-Caution Canary is a Rust service that continuously monitors public Caution/Bootproof attestation endpoints from inside a Caution enclave. For each configured target deployment, it fetches fresh nonce-bound Nitro attestation evidence, compares PCR0/1/2 against operator-supplied policy, and publishes short-lived signed results (hybrid Ed25519 + ML-DSA-65). `canaryctl` is the operator CLI for configuring targets and independently verifying Canary's output.
+Caution Canary is a Rust service that continuously monitors public Caution/Bootproof attestation endpoints from inside a Caution enclave. For each configured target, it fetches fresh nonce-bound Nitro attestation evidence, compares PCR0/1/2 against operator-supplied policy, and publishes short-lived signed results (hybrid Ed25519 + ML-DSA-65). `canaryctl` is the operator CLI for configuring targets and independently verifying Canary's output.
 
 The normative design document is `docs/canary-v0-spec.md` — if code and spec disagree for V0, the spec wins.
 

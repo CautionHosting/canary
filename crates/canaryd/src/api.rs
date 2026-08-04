@@ -1242,6 +1242,11 @@ mod tests {
         assert!(page.contains("data-tab=\"history\""));
         assert!(page.contains("Current result"));
         assert!(page.contains("Recorded attempts"));
+        assert!(page.contains("<h2 id=\"targets-heading\">Targets</h2>"));
+        assert!(page.contains("Verify this target locally"));
+        assert!(page.contains("Target URL"));
+        assert!(!page.contains("<h2 id=\"targets-heading\">Deployments</h2>"));
+        assert!(!page.contains("Verify this deployment locally"));
         assert!(page.contains("id=\"deployment-command\""));
         assert!(
             page.find("id=\"deployment-command\"").unwrap()

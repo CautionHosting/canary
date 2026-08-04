@@ -963,7 +963,7 @@ signatures without access to Caution internals.
     `caution verify`.
 14. README and CLI confirmation explicitly call live PCR capture TOFU and make no
     source-reproduction claim.
-15. The UI lists monitored deployments before independent verification guidance and
+15. The UI lists monitored targets before independent verification guidance and
     Canary runtime details, provides concise local verification commands, and retains
     raw protocol artifacts as secondary links.
 16. The Nitro browser evidence check starts idle, performs no request until explicit

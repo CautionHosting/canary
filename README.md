@@ -1,12 +1,12 @@
 # Caution Canary
 
 Canary continuously checks public Caution/Bootproof attestation endpoints. For each
-deployment, it fetches fresh nonce-bound Nitro evidence, compares PCR0/1/2 with the
+target, it fetches fresh nonce-bound Nitro evidence, compares PCR0/1/2 with the
 policy you supplied, and publishes a short-lived result signed with Ed25519 and
 ML-DSA-65.
 
 `canaryctl` independently verifies the Canary trust input, both signatures, and the
-linked Nitro evidence. A `VERIFIED` deployment means its most recent fresh evidence
+linked Nitro evidence. A `VERIFIED` target means its most recent fresh evidence
 matched its configured PCR0/1/2. Targets configured with `"e2e_mode": "caddy"` also bind
 the attested Caddy certificate fingerprint to the leaf certificate from that exact
 `/attestation` TLS response. It does not prove application correctness or coverage
@@ -24,14 +24,14 @@ The public command surface is flat: `add-target`, `create-signing-seed`,
 `verify-evidence`. Legacy command and flag spellings remain hidden compatibility
 aliases for one release; new scripts must use the names documented here.
 
-You need a public HTTPS Bootproof `/attestation` endpoint for each deployment. Local
+You need a public HTTPS Bootproof `/attestation` endpoint for each target. Local
 use additionally needs Docker with BuildKit and linux/amd64 support.
 
 ## Core flow
 
-### 1. Configure monitored deployments
+### 1. Configure monitored targets
 
-Preferred: reproduce the deployment with Caution and save its PCRs before adding it:
+Preferred: reproduce the target workload with Caution and save its PCRs before adding it:
 
 ```sh
 caution verify \
@@ -47,10 +47,10 @@ canaryctl add-target \
   --expected-pcrs .caution/trusted_hashes.json
 ```
 
-`--canary-id` is required only when creating `canary.json`. Add each further
-deployment with a unique ID; use `--replace` to change an existing one.
+`--canary-id` is required only when creating `canary.json`. Add each further target
+with a unique ID; use `--replace` to change an existing one.
 
-For an enclave-terminated Caddy deployment, add the opt-in binding profile:
+For an enclave-terminated Caddy target, add the opt-in binding profile:
 
 ```sh
 canaryctl add-target \
@@ -153,20 +153,20 @@ and requires a newly saved key pin after every restart.
 
 ### 3. Inspect current status
 
-Open `https://canary.example.com/` (or `http://localhost:8080/` locally). Deployments
+Open `https://canary.example.com/` (or `http://localhost:8080/` locally). Targets
 and their current state appear first, followed by independent verification commands
 and Canary runtime details.
 
-Each deployment inspector shows authenticated observed PCR0/1/2 beside the configured
+Each target inspector shows authenticated observed PCR0/1/2 beside the configured
 expected values and their match result. Retained history rows can expand the same
 measurements for that exact attempt. Statement, raw evidence, decoded claims, and
 history JSON remain available as secondary inspection artifacts.
 
 ![Canary status dashboard](readme_images/canaryd.png)
 
-![Deployment compact overview](readme_images/probe-demo.png)
+![Target compact overview](readme_images/probe-demo.png)
 
-![Deployment history view](readme_images/history-demo.png)
+![Target history view](readme_images/history-demo.png)
 
 For a reported Nitro runtime, the browser evidence check starts as `NOT RUN` and
 makes no attestation request until selected. It generates a fresh nonce, uses
@@ -303,9 +303,9 @@ canaryctl verify-evidence \
   --expected-pcrs .caution/trusted_hashes.json
 ```
 
-These are partial checks. Use `canaryctl verify` for the complete current or
-historical verification path. `--verbose` shows detailed chain diagnostics; `--json`
-emits one machine-readable result. `verify-evidence` is intentionally
+These are partial checks. Use `canaryctl verify` for complete current verification or
+`canaryctl verify-attempt` for one retained attempt. `--verbose` shows detailed chain
+diagnostics; `--json` emits one machine-readable result. `verify-evidence` is intentionally
 attestation/PCR-only: an offline evidence bundle has no TLS connection to compare.
 
 The ignored live Caddy acceptance test uses the production probe path and requires an
@@ -319,11 +319,11 @@ cargo test --locked -p canaryd --test caddy_nitro_live -- --ignored --nocapture
 
 ## Practical trust limits
 
-- Expected deployment PCRs are an operator-supplied policy. TOFU establishes
+- Expected target PCRs are an operator-supplied policy. TOFU establishes
   continuity, not source reproduction.
 - Every result requires Ed25519 and ML-DSA-65 signatures. Nitro's upstream attestation
   chain remains AWS-rooted and classical.
-- Deployment names, URLs, PCRs, keys, statements, evidence, and metadata are public.
+- Target names, URLs, PCRs, keys, statements, evidence, and metadata are public.
 - History is enclave/container-local and is not a durable audit log.
 - Caddy mode binds only the exact attestation HTTPS connection it observed. It does
   not discover replicas or prove application correctness.

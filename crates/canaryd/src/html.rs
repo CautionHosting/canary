@@ -268,23 +268,23 @@ const INSPECTOR: &str = r##"</main>
   <div class="inspector-shell">
     <header class="inspector-head">
       <div><span class="panel-kicker" id="inspector-kicker"></span><div class="inspector-title-row"><h2 id="inspector-title"></h2><span id="inspector-status" class="status-badge"></span></div></div>
-      <button class="close-button" type="button" data-close aria-label="Close deployment inspector">Close</button>
+      <button class="close-button" type="button" data-close aria-label="Close target inspector">Close</button>
     </header>
-    <nav class="tabs" role="tablist" aria-label="Deployment information">
+    <nav class="tabs" role="tablist" aria-label="Target information">
       <button class="tab" type="button" role="tab" data-tab="overview" aria-selected="true">Overview</button>
       <button class="tab" type="button" role="tab" data-tab="history" aria-selected="false" tabindex="-1">History</button>
     </nav>
     <section class="panel" data-panel="overview" role="tabpanel">
-      <div class="panel-intro"><h3>Current result</h3><p>Canary signs the current result for this deployment. <strong>VERIFIED</strong> means fresh Nitro evidence matched its configured PCR0/1/2. Verify it locally with <code>canaryctl</code>.</p></div>
+      <div class="panel-intro"><h3>Current result</h3><p>Canary signs the current result for this target. <strong>VERIFIED</strong> means fresh Nitro evidence matched its configured PCR0/1/2. Verify it locally with <code>canaryctl</code>.</p></div>
       <dl class="inspector-details">
-        <div class="detail detail--wide"><dt>Deployment URL</dt><dd id="inspector-origin"></dd></div>
+        <div class="detail detail--wide"><dt>Target URL</dt><dd id="inspector-origin"></dd></div>
         <div class="detail"><dt>Result</dt><dd id="inspector-reason"></dd></div>
         <div class="detail"><dt>Observed</dt><dd id="inspector-observed"></dd></div>
         <div class="detail"><dt>Valid until</dt><dd id="inspector-expires"></dd></div>
         <div class="detail"><dt>Transport warning</dt><dd id="inspector-warning"></dd></div>
       </dl>
       <section class="pcr-panel" data-evidence-claims data-state="idle" aria-labelledby="pcr-panel-heading">
-        <div class="pcr-panel-head"><div><h3 id="pcr-panel-heading">Authenticated Nitro measurements</h3><p data-evidence-claims-summary>Open a deployment to load its decoded evidence claims.</p></div><span class="pcr-panel-status" data-evidence-claims-status>WAITING</span></div>
+        <div class="pcr-panel-head"><div><h3 id="pcr-panel-heading">Authenticated Nitro measurements</h3><p data-evidence-claims-summary>Open a target to load its decoded evidence claims.</p></div><span class="pcr-panel-status" data-evidence-claims-status>WAITING</span></div>
         <table class="pcr-table" data-evidence-claims-table hidden>
           <thead><tr><th scope="col">PCR</th><th scope="col">Meaning</th><th scope="col">Observed</th><th scope="col">Expected</th><th scope="col">Match</th></tr></thead>
           <tbody>
@@ -304,7 +304,7 @@ const INSPECTOR: &str = r##"</main>
         </dl>
         <div class="panel-verify"><h3>Check the current HTTPS certificate</h3><div class="command-row"><pre id="caddy-certificate-command"></pre><button class="copy-button" type="button" data-copy="#caddy-certificate-command">Copy</button></div></div>
       </section>
-      <div class="panel-verify deployment-command-box"><h3>Verify this deployment locally</h3><div class="command-row"><pre id="deployment-command"></pre><button class="copy-button" type="button" data-copy="#deployment-command">Copy</button></div></div>
+      <div class="panel-verify deployment-command-box"><h3>Verify this target locally</h3><div class="command-row"><pre id="deployment-command"></pre><button class="copy-button" type="button" data-copy="#deployment-command">Copy</button></div></div>
       <div class="panel-links"><a class="raw-link" id="statement-json-link" href="#">Statement JSON</a><a class="raw-link" id="evidence-json-link" href="#">Raw evidence JSON</a><a class="raw-link" id="evidence-claims-json-link" href="#">Decoded claims JSON</a></div>
     </section>
     <section class="panel" data-panel="history" role="tabpanel" hidden>
@@ -324,13 +324,13 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
     page.push_str(environment_token(snapshot.runtime.environment));
     page.push_str("\" data-identity-mode=\"");
     page.push_str(identity_mode_token(snapshot.runtime.identity_mode));
-    page.push_str("\"><main class=\"shell\"><header class=\"intro\"><div class=\"topline\"><div><p class=\"eyebrow\">canaryd</p><h1>Canary status</h1><p class=\"lede\">Canary checks each deployment’s Nitro attestation against expected PCR0/1/2 and signs the result.</p></div><nav class=\"raw-nav\" aria-label=\"Raw node documents\"><a href=\"/status.json\">Status JSON</a><a href=\"/config.json\">Config JSON</a><a href=\"/keys.json\">Keys JSON</a></nav></div></header>");
-    page.push_str("<section class=\"targets-section\" aria-labelledby=\"targets-heading\"><div class=\"section-heading\"><h2 id=\"targets-heading\">Deployments</h2><span class=\"target-count\">");
+    page.push_str("\"><main class=\"shell\"><header class=\"intro\"><div class=\"topline\"><div><p class=\"eyebrow\">canaryd</p><h1>Canary status</h1><p class=\"lede\">Canary checks each target’s Nitro attestation against expected PCR0/1/2 and signs the result.</p></div><nav class=\"raw-nav\" aria-label=\"Raw node documents\"><a href=\"/status.json\">Status JSON</a><a href=\"/config.json\">Config JSON</a><a href=\"/keys.json\">Keys JSON</a></nav></div></header>");
+    page.push_str("<section class=\"targets-section\" aria-labelledby=\"targets-heading\"><div class=\"section-heading\"><h2 id=\"targets-heading\">Targets</h2><span class=\"target-count\">");
     page.push_str(&snapshot.targets.len().to_string());
     page.push_str(if snapshot.targets.len() == 1 {
-        " deployment"
+        " target"
     } else {
-        " deployments"
+        " targets"
     });
     page.push_str("</span></div><div class=\"targets\">");
 
@@ -389,7 +389,7 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
         page.push_str(status_class(target.status));
         page.push_str("\">");
         push_escaped(&mut page, status_text(target.status));
-        page.push_str("</span><button class=\"open-target\" type=\"button\" data-open-target aria-haspopup=\"dialog\">Inspect →</button></div></header><dl class=\"target-details\"><div class=\"detail detail--wide\"><dt>Deployment URL</dt><dd><code>");
+        page.push_str("</span><button class=\"open-target\" type=\"button\" data-open-target aria-haspopup=\"dialog\">Inspect →</button></div></header><dl class=\"target-details\"><div class=\"detail detail--wide\"><dt>Target URL</dt><dd><code>");
         push_escaped(&mut page, &target.target_origin);
         page.push_str("</code></dd></div><div class=\"detail\"><dt>Last check</dt><dd>");
         if let Some(observed) = target.observed_at {

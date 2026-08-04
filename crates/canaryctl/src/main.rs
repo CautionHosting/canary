@@ -29,7 +29,8 @@ const DEFAULT_KEYS_FILE: &str = "canary-keys.json";
 #[command(
     name = "canaryctl",
     version,
-    about = "Caution Canary operator CLI (V0)"
+    about = "Caution Canary operator CLI (V0)",
+    disable_help_subcommand = true
 )]
 struct Cli {
     /// Emit one machine-readable JSON result object for a one-shot command.
@@ -261,16 +262,20 @@ enum LegacyArtifactCommand {
 
 #[derive(Args)]
 struct VerifyStatementArgs {
+    /// Standalone signed statement JSON to verify.
     #[arg(long)]
     statement: PathBuf,
+    /// Exact Canary key pin created by `canaryctl save-canary-keys`.
     #[arg(long, alias = "keys", default_value = DEFAULT_KEYS_FILE)]
     trusted_keys: PathBuf,
 }
 
 #[derive(Args)]
 struct VerifyEvidenceArgs {
+    /// Standalone evidence bundle JSON to verify.
     #[arg(long)]
     evidence: PathBuf,
+    /// Independently trusted target PCR0/1/2 file.
     #[arg(long, alias = "pcrs")]
     expected_pcrs: PathBuf,
 }

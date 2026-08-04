@@ -612,6 +612,13 @@ fn top_level_help_is_flat_and_hides_compatibility_commands() {
     let output = run(&["--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
+    let visible_commands = help
+        .lines()
+        .skip_while(|line| *line != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(visible_commands.len(), 8, "unexpected command list: {help}");
     let mut previous = 0;
     for command in [
         "add-target",
@@ -632,6 +639,9 @@ fn top_level_help_is_flat_and_hides_compatibility_commands() {
             .lines()
             .any(|line| line.trim_start().starts_with(legacy)));
     }
+    assert!(!visible_commands
+        .iter()
+        .any(|line| line.trim_start().starts_with("help")));
 }
 
 #[test]
@@ -682,6 +692,59 @@ fn legacy_commands_and_flags_remain_hidden_compatibility_aliases() {
     ]);
     assert!(output.status.success());
     assert!(config.exists());
+
+    let keys = dir.join("keys.json");
+    let canonical = run(&[
+        "save-canary-keys",
+        "--canary-url",
+        "not-a-url",
+        "--skip-canary-attestation",
+        "--allow-http",
+        "--output",
+        path_arg(&keys),
+    ]);
+    let legacy = run(&[
+        "enroll",
+        "--url",
+        "not-a-url",
+        "--insecure",
+        "--keys",
+        path_arg(&keys),
+    ]);
+    assert_eq!(legacy.status, canonical.status);
+    assert_eq!(legacy.stderr, canonical.stderr);
+
+    let missing_evidence = dir.join("missing-evidence.json");
+    let canonical = run(&[
+        "verify-evidence",
+        "--evidence",
+        path_arg(&missing_evidence),
+        "--expected-pcrs",
+        path_arg(&pcrs),
+    ]);
+    let legacy = run(&[
+        "artifact",
+        "verify-evidence",
+        "--evidence",
+        path_arg(&missing_evidence),
+        "--pcrs",
+        path_arg(&pcrs),
+    ]);
+    assert_eq!(legacy.status, canonical.status);
+    assert_eq!(legacy.stderr, canonical.stderr);
+
+    let missing_watch = dir.join("missing-watch.json");
+    let canonical = run(&[
+        "watch",
+        "--config",
+        path_arg(&missing_watch),
+        "--skip-canary-attestation",
+        "--allow-http-canary",
+        "--allow-http-webhooks",
+    ]);
+    let legacy = run(&["watch", "--config", path_arg(&missing_watch), "--insecure"]);
+    assert_eq!(legacy.status, canonical.status);
+    assert_eq!(legacy.stderr, canonical.stderr);
 }
 
 #[test]

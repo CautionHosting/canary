@@ -12,6 +12,7 @@ use url::Url;
 
 use crate::evidence::ProbeReason;
 use crate::statement::Status;
+use crate::tls_binding::TlsBindingResult;
 
 /// Fixed V0 statement/result lifetime (spec §6, §9, §10).
 pub const RESULT_TTL: Duration = Duration::seconds(180);
@@ -30,6 +31,7 @@ pub enum StateReason {
     InvalidSignature,
     NonceMismatch,
     MalformedEvidence,
+    TlsBindingMismatch,
     HttpError,
     Timeout,
     Unreachable,
@@ -49,6 +51,7 @@ impl StateReason {
             Self::InvalidSignature => "INVALID_SIGNATURE",
             Self::NonceMismatch => "NONCE_MISMATCH",
             Self::MalformedEvidence => "MALFORMED_EVIDENCE",
+            Self::TlsBindingMismatch => "TLS_BINDING_MISMATCH",
             Self::HttpError => "HTTP_ERROR",
             Self::Timeout => "TIMEOUT",
             Self::Unreachable => "UNREACHABLE",
@@ -78,6 +81,7 @@ impl From<ProbeReason> for StateReason {
             ProbeReason::InvalidSignature => Self::InvalidSignature,
             ProbeReason::NonceMismatch => Self::NonceMismatch,
             ProbeReason::MalformedEvidence => Self::MalformedEvidence,
+            ProbeReason::TlsBindingMismatch => Self::TlsBindingMismatch,
             ProbeReason::HttpError => Self::HttpError,
             ProbeReason::Timeout => Self::Timeout,
             ProbeReason::Unreachable => Self::Unreachable,
@@ -94,6 +98,7 @@ pub struct DefinitiveObservation {
     pub observed_at: DateTime<Utc>,
     /// The decoded-document digest, when document bytes were available.
     pub evidence_digest: Option<String>,
+    pub tls: Option<TlsBindingResult>,
 }
 
 impl DefinitiveObservation {
@@ -102,16 +107,37 @@ impl DefinitiveObservation {
         observed_at: DateTime<Utc>,
         evidence_digest: Option<String>,
     ) -> Result<Self, StateError> {
+        Self::new_with_tls(reason, observed_at, evidence_digest, None)
+    }
+
+    pub fn new_with_tls(
+        reason: StateReason,
+        observed_at: DateTime<Utc>,
+        evidence_digest: Option<String>,
+        tls: Option<TlsBindingResult>,
+    ) -> Result<Self, StateError> {
         if !reason.is_definitive() {
             return Err(StateError::NotDefinitiveReason(reason));
         }
         if reason == StateReason::AllChecksPassed && evidence_digest.is_none() {
             return Err(StateError::VerifiedWithoutEvidence);
         }
+        if reason == StateReason::TlsBindingMismatch && evidence_digest.is_none() {
+            return Err(StateError::TlsBindingWithoutEvidence);
+        }
+        if tls.is_some()
+            && !matches!(
+                reason,
+                StateReason::AllChecksPassed | StateReason::TlsBindingMismatch
+            )
+        {
+            return Err(StateError::TlsBindingWithWrongReason(reason));
+        }
         Ok(Self {
             reason,
             observed_at,
             evidence_digest,
+            tls,
         })
     }
 
@@ -152,6 +178,10 @@ pub enum StateError {
     NotTransportReason(StateReason),
     #[error("a verified observation requires an evidence digest")]
     VerifiedWithoutEvidence,
+    #[error("a TLS binding mismatch requires verified evidence")]
+    TlsBindingWithoutEvidence,
+    #[error("TLS binding result cannot accompany {0:?}")]
+    TlsBindingWithWrongReason(StateReason),
     #[error("invalid configured attestation URL: {0}")]
     InvalidTargetUrl(#[from] url::ParseError),
     #[error("target origin must be an HTTPS URL without credentials")]
@@ -185,6 +215,7 @@ pub struct DerivedTargetState {
     pub status: Status,
     pub reason: StateReason,
     pub evidence_digest: Option<String>,
+    pub tls: Option<TlsBindingResult>,
     pub observed_at: Option<DateTime<Utc>>,
     /// Present only while a definitive result is current.  The scheduler uses
     /// this deadline to enqueue the active expiry transition exactly on time.
@@ -255,6 +286,7 @@ impl TargetReducer {
                 status: Status::Pending,
                 reason: StateReason::Pending,
                 evidence_digest: None,
+                tls: None,
                 observed_at: None,
                 definitive_expires_at: None,
                 transport_warning: None,
@@ -268,6 +300,7 @@ impl TargetReducer {
                     status: observation.status(),
                     reason: observation.reason,
                     evidence_digest: observation.evidence_digest.clone(),
+                    tls: observation.tls.clone(),
                     observed_at: Some(observation.observed_at),
                     definitive_expires_at: Some(expires_at),
                     transport_warning: self.transport_warning,
@@ -287,6 +320,7 @@ impl TargetReducer {
             status,
             reason,
             evidence_digest: None,
+            tls: None,
             observed_at: None,
             definitive_expires_at: None,
             transport_warning: None,
@@ -363,6 +397,41 @@ mod tests {
     }
 
     #[test]
+    fn tls_mismatch_immediately_replaces_fresh_success_with_diagnostics() {
+        let mut reducer = TargetReducer::new();
+        reducer.apply_definitive(valid());
+        let tls = TlsBindingResult {
+            attested_mode: "caddy".to_owned(),
+            attested_domain: "app.example.com".to_owned(),
+            attested_certfp: "a".repeat(64),
+            observed_certfp: "b".repeat(64),
+        };
+        reducer.apply_definitive(
+            DefinitiveObservation::new_with_tls(
+                StateReason::TlsBindingMismatch,
+                at(1_001),
+                Some(format!("sha256:{}", "b".repeat(64))),
+                Some(tls.clone()),
+            )
+            .unwrap(),
+        );
+        let failed = reducer.derive_at(at(1_001));
+        assert_eq!(failed.status, Status::Failed);
+        assert_eq!(failed.reason, StateReason::TlsBindingMismatch);
+        assert_eq!(failed.tls, Some(tls));
+        assert_eq!(
+            DefinitiveObservation::new_with_tls(
+                StateReason::TlsBindingMismatch,
+                at(1_002),
+                None,
+                None,
+            )
+            .unwrap_err(),
+            StateError::TlsBindingWithoutEvidence
+        );
+    }
+
+    #[test]
     fn expired_validation_failure_is_not_preserved_forever() {
         let mut reducer = TargetReducer::new();
         reducer.apply_definitive(
@@ -429,6 +498,7 @@ mod tests {
             ProbeReason::InvalidSignature,
             ProbeReason::NonceMismatch,
             ProbeReason::MalformedEvidence,
+            ProbeReason::TlsBindingMismatch,
             ProbeReason::HttpError,
             ProbeReason::Timeout,
             ProbeReason::Unreachable,

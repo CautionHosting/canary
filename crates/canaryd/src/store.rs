@@ -648,6 +648,7 @@ mod tests {
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_owned(),
                 evidence_digest: None,
+                tls: None,
                 observed_at: observed_at.map(timestamp),
                 issued_at: timestamp(issued_at),
                 expires_at: timestamp(issued_at + Duration::seconds(180)),

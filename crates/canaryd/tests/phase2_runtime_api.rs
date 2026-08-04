@@ -50,12 +50,14 @@ fn test_config() -> Config {
                 // A literal local IP makes Tokio resolution hermetic. The
                 // monitor's address policy rejects it before any TCP/TLS I/O.
                 attestation_url: "https://127.0.0.1/attestation".to_owned(),
+                e2e_mode: None,
                 expected_pcrs: expected_pcrs(),
             },
             Target {
                 id: "loopback-v6".to_owned(),
                 name: "Loopback v6".to_owned(),
                 attestation_url: "https://[::1]/attestation".to_owned(),
+                e2e_mode: None,
                 expected_pcrs: expected_pcrs(),
             },
         ],
@@ -100,6 +102,7 @@ fn fixture_config() -> Config {
             id: "aws-test".to_owned(),
             name: "AWS test fixture".to_owned(),
             attestation_url: "https://fixture.example/attestation".to_owned(),
+            e2e_mode: None,
             expected_pcrs: ExpectedPcrs {
                 pcr0: FIXTURE_PCR_0_AND_1.to_owned(),
                 pcr1: FIXTURE_PCR_0_AND_1.to_owned(),
@@ -137,6 +140,7 @@ impl ProbeTransport for FixtureTransport {
                 "manifest": {},
             }))
             .unwrap(),
+            peer_certificate_der: None,
         })
     }
 }
@@ -207,6 +211,7 @@ impl ProbeRunner for BlockingRunner {
             evidence_claims: None,
             evidence_digest: None,
             manifest_digest: None,
+            tls: None,
         }
     }
 }
@@ -522,6 +527,7 @@ async fn runtime_admits_exactly_eight_blocking_probe_runners_before_the_ninth() 
             id: format!("target-{number}"),
             name: format!("Target {number}"),
             attestation_url: format!("https://target-{number}.example/attestation"),
+            e2e_mode: None,
             expected_pcrs: expected_pcrs(),
         })
         .collect();

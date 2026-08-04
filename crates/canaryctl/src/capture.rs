@@ -1,11 +1,11 @@
-//! TOFU enrollment backing `canaryctl deployment add --tofu`.
+//! TOFU capture backing `canaryctl add-target --tofu`.
 //!
 //! Challenges a live target's `/attestation` endpoint, extracts candidate
 //! PCR0/1/2 from the signed COSE_Sign1 document, validates the document's
 //! chain/signature/nonce against exactly those candidate values, then
 //! requires explicit human confirmation (or `--accept-tofu`) before writing
 //! them into `canary.json`. This is Trust On First Use: it proves only that
-//! future observations keep matching these live-enrolled values, never that
+//! future observations keep matching these live-captured values, never that
 //! they match reviewed or independently reproduced source (spec §4).
 
 use std::io::{Read as _, Write as _};
@@ -87,7 +87,7 @@ pub fn run(
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock before UNIX epoch")?;
-    enroll_response(
+    capture_response(
         config_path,
         id,
         attestation_url,
@@ -121,6 +121,7 @@ fn preflight_config(
             id: id.to_string(),
             name: name.to_string(),
             attestation_url: attestation_url.to_string(),
+            e2e_mode: None,
             expected_pcrs: ExpectedPcrs {
                 pcr0: placeholder_pcr.clone(),
                 pcr1: placeholder_pcr.clone(),
@@ -131,13 +132,13 @@ fn preflight_config(
     )?;
     config
         .validate()
-        .context("proposed deployment failed validation; refusing network request")?;
+        .context("proposed target failed validation; refusing network request")?;
 
     Ok(config)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn enroll_response(
+fn capture_response(
     config_path: &Path,
     id: &str,
     _attestation_url: &str,
@@ -171,12 +172,12 @@ fn enroll_response(
         );
     }
 
-    let enrolled_target = config
+    let captured_target = config
         .targets
         .iter_mut()
         .find(|target| target.id == id)
-        .context("preflight deployment disappeared from config")?;
-    enrolled_target.expected_pcrs = ExpectedPcrs {
+        .context("preflight target disappeared from config")?;
+    captured_target.expected_pcrs = ExpectedPcrs {
         pcr0: candidate.pcr0.clone(),
         pcr1: candidate.pcr1.clone(),
         pcr2: candidate.pcr2.clone(),
@@ -186,7 +187,7 @@ fn enroll_response(
         .context("captured PCR values failed config validation")?;
 
     if !accept_tofu {
-        println!("Candidate PCRs from the live deployment:");
+        println!("Candidate PCRs from the live target:");
         println!("  PCR0: {}", candidate.pcr0);
         println!("  PCR1: {}", candidate.pcr1);
         println!("  PCR2: {}", candidate.pcr2);
@@ -205,7 +206,7 @@ fn enroll_response(
 }
 
 fn confirm_interactively() -> Result<bool> {
-    print!("Enroll these TOFU PCR values into canary.json? [y/N] ");
+    print!("Save these TOFU PCR values in canary.json? [y/N] ");
     std::io::stdout().flush().ok();
     let mut line = String::new();
     std::io::stdin()
@@ -297,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_fixture_enrolls_through_accept_tofu_path() {
+    fn verified_fixture_is_captured_through_accept_tofu_path() {
         let path = temp_config_path("accept");
         let url = "https://payments.example.com/attestation";
         let config = preflight_config(
@@ -310,7 +311,7 @@ mod tests {
         )
         .unwrap();
 
-        enroll_response(
+        capture_response(
             &path,
             "payments-prod",
             url,
@@ -346,7 +347,7 @@ mod tests {
         .unwrap();
         let wrong_nonce = [0x10; 32];
 
-        let err = enroll_response(
+        let err = capture_response(
             &path,
             "payments-prod",
             url,

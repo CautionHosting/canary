@@ -100,7 +100,9 @@ jq -e '
   (.targets | type == "array" and length >= 2) and
   all(.targets[];
     type == "object" and
-    (keys | sort) == ["attestation_url", "expected_pcrs", "id", "name"] and
+    ((keys | sort) == ["attestation_url", "expected_pcrs", "id", "name"] or
+     (keys | sort) == ["attestation_url", "e2e_mode", "expected_pcrs", "id", "name"]) and
+    (.e2e_mode == null or .e2e_mode == "caddy") and
     (.expected_pcrs | type == "object" and (keys | sort) == ["0", "1", "2"])
   )
 ' "$CONFIG" >/dev/null || die "canary.json has the wrong V0 shape or fewer than two targets"
@@ -128,28 +130,34 @@ origin_count="$(jq -r '
     capture("^(?<origin>https://[^/?#]+)(?:/|$)").origin] |
   unique | length
 ' "$CONFIG")" || die "every target attestation_url must have an HTTPS origin"
-[[ "$origin_count" -ge 2 ]] || die "canary.json must enroll at least two unique HTTPS origins"
+[[ "$origin_count" -ge 2 ]] || die "canary.json must configure at least two unique HTTPS origins"
 
-# `deployment add --replace` parses the full config with canaryctl's strict
+# `add-target --replace` parses the full config with canaryctl's strict
 # deny-unknown-fields schema, then rewrites a temporary copy. A byte-for-byte
-# comparison proves the committed file is canonical `deployment add` output.
+# comparison proves the committed file is canonical `add-target` output.
 first_id="$(jq -r '.targets[0].id' "$CONFIG")"
 first_name="$(jq -r '.targets[0].name' "$CONFIG")"
 first_url="$(jq -r '.targets[0].attestation_url' "$CONFIG")"
+first_e2e_mode="$(jq -r '.targets[0].e2e_mode // empty' "$CONFIG")"
+e2e_args=()
+if [[ "$first_e2e_mode" == "caddy" ]]; then
+  e2e_args=(--e2e-mode caddy)
+fi
 cp "$CONFIG" "$tmp_dir/canary.json"
 jq '{pcr0: .targets[0].expected_pcrs["0"], pcr1: .targets[0].expected_pcrs["1"], pcr2: .targets[0].expected_pcrs["2"]}' \
   "$CONFIG" >"$tmp_dir/pcrs.json"
 (
   cd "$ROOT"
-  cargo run --quiet --locked -p canaryctl -- deployment add \
+  cargo run --quiet --locked -p canaryctl -- add-target \
     --config "$tmp_dir/canary.json" \
     --id "$first_id" \
     --name "$first_name" \
-    --url "$first_url" \
-    --pcrs "$tmp_dir/pcrs.json" \
+    --attestation-url "$first_url" \
+    "${e2e_args[@]}" \
+    --expected-pcrs "$tmp_dir/pcrs.json" \
     --replace >/dev/null
 ) || die "canaryctl rejected canary.json"
 cmp -s "$CONFIG" "$tmp_dir/canary.json" \
-  || die "canary.json was not produced by canonical canaryctl deployment add output"
+  || die "canary.json was not produced by canonical canaryctl add-target output"
 
 printf 'deployment inputs are release-valid\n'

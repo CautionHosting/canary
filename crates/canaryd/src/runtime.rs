@@ -22,7 +22,7 @@ use canary_core::{
         canonical_target_origin, DefinitiveObservation, StateReason, TargetReducer,
         TransportFailure, RESULT_TTL,
     },
-    statement::{sign_statement, Payload, Statement, Status, CLAIM_TYPE},
+    statement::{claim_type_for_e2e_mode, sign_statement, Payload, Statement, Status},
 };
 use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
 use rand::Rng;
@@ -674,11 +674,14 @@ impl Runtime {
         let reason = StateReason::from(attempt.reason);
         let definitive_applied = match attempt.classification {
             ProbeClassification::Definitive => {
-                managed.reducer.apply_definitive(DefinitiveObservation::new(
-                    reason,
-                    canonical_second(attempt.observed_at.unwrap_or(now)),
-                    attempt.evidence_digest.clone(),
-                )?)
+                managed
+                    .reducer
+                    .apply_definitive(DefinitiveObservation::new_with_tls(
+                        reason,
+                        canonical_second(attempt.observed_at.unwrap_or(now)),
+                        attempt.evidence_digest.clone(),
+                        attempt.tls.clone(),
+                    )?)
             }
             ProbeClassification::Transport => {
                 managed
@@ -829,13 +832,14 @@ impl Runtime {
             Arc::clone(&self.inner.keyset),
             Arc::clone(&self.inner.signing),
             Payload {
-                claim_type: CLAIM_TYPE.to_owned(),
+                claim_type: claim_type_for_e2e_mode(target.e2e_mode).to_owned(),
                 target_id: target.id.clone(),
                 target_origin: origin.to_owned(),
                 status: derived.status,
                 reason: derived.reason.as_str().to_owned(),
                 config_digest: self.inner.config.config_digest.clone(),
                 evidence_digest: derived.evidence_digest.clone(),
+                tls: derived.tls.clone(),
                 observed_at: observed_at.map(timestamp),
                 issued_at: timestamp(issued_at),
                 expires_at: timestamp(expires_at),
@@ -896,13 +900,14 @@ fn pending_payload(
     now: DateTime<Utc>,
 ) -> Payload {
     Payload {
-        claim_type: CLAIM_TYPE.to_owned(),
+        claim_type: claim_type_for_e2e_mode(target.e2e_mode).to_owned(),
         target_id: target.id.clone(),
         target_origin: origin.to_owned(),
         status: Status::Pending,
         reason: StateReason::Pending.as_str().to_owned(),
         config_digest: config_digest.to_owned(),
         evidence_digest: None,
+        tls: None,
         observed_at: None,
         issued_at: timestamp(now),
         expires_at: timestamp(now + RESULT_TTL),
@@ -1070,6 +1075,7 @@ mod tests {
                 evidence_claims: None,
                 evidence_digest: None,
                 manifest_digest: None,
+                tls: None,
             }
         }
     }
@@ -1091,6 +1097,7 @@ mod tests {
                 evidence_claims: None,
                 evidence_digest: None,
                 manifest_digest: None,
+                tls: None,
             }
         }
     }
@@ -1112,6 +1119,7 @@ mod tests {
                 evidence_claims: None,
                 evidence_digest: None,
                 manifest_digest: None,
+                tls: None,
             }
         }
     }
@@ -1154,6 +1162,7 @@ mod tests {
             evidence_claims: None,
             evidence_digest: None,
             manifest_digest: None,
+            tls: None,
         }
     }
 
@@ -1181,6 +1190,7 @@ mod tests {
             evidence_claims: None,
             evidence_digest: Some(evidence_digest),
             manifest_digest: Some(format!("sha256:{}", "b".repeat(64))),
+            tls: None,
         }
     }
 

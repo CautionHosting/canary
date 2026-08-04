@@ -7,11 +7,12 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use canary_core::{
     canonical::digest,
-    config::Target,
+    config::{E2eMode, Target},
     evidence::{pcrs_from_hex, verify_evidence, AuthenticatedPcrClaims, EvidenceBundle},
     node::{ConfigDocument, IdentityMode},
     state::canonical_target_origin,
-    statement::{Statement, Status},
+    statement::{claim_type_for_e2e_mode, Statement, Status},
+    tls_binding::TLS_BINDING_MISMATCH_REASON,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
@@ -100,16 +101,17 @@ impl DeploymentResult {
 pub fn run(
     base_url: &str,
     pcrs_file: Option<&Path>,
-    insecure: bool,
+    skip_canary_attestation: bool,
+    allow_http: bool,
     keys_path: &Path,
     requested_targets: &[String],
 ) -> Result<VerificationOutcome> {
     let started_at = Utc::now();
-    let node = match (pcrs_file, insecure) {
+    let node = match (pcrs_file, skip_canary_attestation) {
         (Some(path), false) => inspect::inspect(base_url, path)?,
-        (None, true) => inspect::inspect_unattested(base_url)?,
+        (None, true) => inspect::inspect_unattested(base_url, allow_http)?,
         (Some(_), true) | (None, false) => {
-            bail!("pass exactly one of --pcrs or --insecure")
+            bail!("pass exactly one of --expected-pcrs or --skip-canary-attestation")
         }
     };
     node.verify_pinned_keys(keys_path)?;
@@ -188,7 +190,8 @@ struct HistoricalObservation {
 pub fn run_history(
     base_url: &str,
     pcrs_file: Option<&Path>,
-    insecure: bool,
+    skip_canary_attestation: bool,
+    allow_http: bool,
     keys_path: &Path,
     target_id: &str,
     attempt_id: i64,
@@ -196,11 +199,11 @@ pub fn run_history(
     if attempt_id < 1 {
         bail!("--attempt must be a positive history ID");
     }
-    let node = match (pcrs_file, insecure) {
+    let node = match (pcrs_file, skip_canary_attestation) {
         (Some(path), false) => inspect::inspect(base_url, path)?,
-        (None, true) => inspect::inspect_unattested(base_url)?,
+        (None, true) => inspect::inspect_unattested(base_url, allow_http)?,
         (Some(_), true) | (None, false) => {
-            bail!("pass exactly one of --pcrs or --insecure")
+            bail!("pass exactly one of --expected-pcrs or --skip-canary-attestation")
         }
     };
     node.verify_pinned_keys(keys_path)?;
@@ -210,7 +213,7 @@ pub fn run_history(
         .targets
         .iter()
         .find(|target| target.id == target_id)
-        .with_context(|| format!("verified Canary config has no deployment {target_id:?}"))?;
+        .with_context(|| format!("verified Canary config has no target {target_id:?}"))?;
     let attempt_segment = attempt_id.to_string();
     let historical: HistoricalAttempt = node
         .get_json(&["targets", target_id, "history", attempt_segment.as_str()])
@@ -220,7 +223,7 @@ pub fn run_history(
         || historical.observation.target_id != target_id
         || historical.statement.payload.target_id != target_id
     {
-        bail!("historical response does not match the requested deployment and attempt");
+        bail!("historical response does not match the requested target and attempt");
     }
     if historical.observation.config_digest != historical.statement.payload.config_digest {
         bail!("historical summary config_digest does not match the signed statement");
@@ -238,17 +241,14 @@ pub fn run_history(
         &historical.statement,
         issued_at,
     )?;
-    let report = match historical.evidence.as_ref() {
-        Some(evidence) => verify_target_artifacts(
-            &node.config,
-            &node.keys,
-            target,
-            &historical.statement,
-            Some(evidence),
-            issued_at,
-        )?,
-        None => TargetReport::from_statement(&historical.statement, false, None, issued_at),
-    };
+    let report = verify_target_artifacts(
+        &node.config,
+        &node.keys,
+        target,
+        &historical.statement,
+        historical.evidence.as_ref(),
+        issued_at,
+    )?;
 
     let mut verbose = node_report_text(&node, pcrs_file, keys_path);
     verbose.push_str(&output::historical_attempt_text(
@@ -285,14 +285,14 @@ fn select_targets<'a>(config: &'a ConfigDocument, requested: &[String]) -> Resul
     let mut selected = Vec::with_capacity(requested.len());
     for id in requested {
         if !seen.insert(id.as_str()) {
-            bail!("--deployment {id:?} was supplied more than once");
+            bail!("--target {id:?} was supplied more than once");
         }
         let target = config
             .config
             .targets
             .iter()
             .find(|target| target.id == *id)
-            .with_context(|| format!("verified Canary config has no deployment {id:?}"))?;
+            .with_context(|| format!("verified Canary config has no target {id:?}"))?;
         selected.push(target);
     }
     Ok(selected)
@@ -453,7 +453,7 @@ fn verify_target_artifacts(
                 &target.expected_pcrs.pcr1,
                 &target.expected_pcrs.pcr2,
             )
-            .context("decoding deployment PCR0/1/2 from verified Canary config")?;
+            .context("decoding target PCR0/1/2 from verified Canary config")?;
             let seconds = decoded.observed_at.timestamp();
             if seconds < 0 {
                 bail!("evidence observed_at is before the UNIX epoch");
@@ -471,24 +471,15 @@ fn verify_target_artifacts(
             if outcome.evidence_digest != expected_digest {
                 bail!("verified evidence digest does not match signed statement");
             }
-            if outcome.reason.as_str() != payload.reason {
+            let caddy_tls_mismatch = target.e2e_mode == Some(E2eMode::Caddy)
+                && outcome.passed
+                && payload.reason == TLS_BINDING_MISMATCH_REASON;
+            if outcome.reason.as_str() != payload.reason && !caddy_tls_mismatch {
                 bail!(
                     "evidence result {} does not match signed reason {}",
                     outcome.reason.as_str(),
                     payload.reason
                 );
-            }
-            match payload.status {
-                Status::Verified if !outcome.passed => {
-                    bail!("VERIFIED statement is not supported by passing evidence")
-                }
-                Status::Failed if outcome.passed => {
-                    bail!("FAILED statement is contradicted by passing evidence")
-                }
-                Status::Pending | Status::Unreachable | Status::Stale => {
-                    bail!("non-definitive statement must not reference evidence")
-                }
-                Status::Verified | Status::Failed => {}
             }
             Ok(TargetReport::from_statement(
                 statement,
@@ -522,6 +513,9 @@ fn verify_statement_binding(
     }
     if payload.verifier_id != config.config.node_id {
         bail!("signed verifier_id does not match verified Canary node");
+    }
+    if payload.claim_type != claim_type_for_e2e_mode(target.e2e_mode) {
+        bail!("signed claim_type does not match verified Canary target profile");
     }
     Ok(())
 }
@@ -579,7 +573,7 @@ fn node_report_text(node: &InspectedNode, pcrs_file: Option<&Path>, keys_path: &
                     writeln!(output, "  Current-process key pin PASS").unwrap();
                     writeln!(
                         output,
-                        "  Restart behavior        NEW KEYS — RE-ENROLL REQUIRED"
+                        "  Restart behavior        NEW KEYS — SAVE NEW KEY PIN REQUIRED"
                     )
                     .unwrap();
                 }
@@ -587,9 +581,22 @@ fn node_report_text(node: &InspectedNode, pcrs_file: Option<&Path>, keys_path: &
         }
         NodeTrust::UnattestedDev => {
             writeln!(output, "  Trust mode              TOFU").unwrap();
-            writeln!(output, "  Canary attestation      SKIPPED — --insecure").unwrap();
+            writeln!(
+                output,
+                "  Canary attestation      SKIPPED — --skip-canary-attestation"
+            )
+            .unwrap();
             writeln!(output, "  Canary workload PCRs    NOT VERIFIED").unwrap();
-            writeln!(output, "  Transport policy        HTTP ALLOWED").unwrap();
+            writeln!(
+                output,
+                "  Transport               {}",
+                if node.uses_http() {
+                    "HTTP — --allow-http"
+                } else {
+                    "HTTPS"
+                }
+            )
+            .unwrap();
             writeln!(
                 output,
                 "  Config authenticity     NOT VERIFIED — SELF-CONSISTENT ONLY"
@@ -665,7 +672,8 @@ mod tests {
     use canary_core::{
         config::{Config, ExpectedPcrs},
         keys::{KeySet, MasterSeed},
-        statement::{sign_statement, Payload, CLAIM_TYPE},
+        statement::{sign_statement, Payload},
+        tls_binding::TlsBindingResult,
     };
     use chrono::Duration;
 
@@ -683,6 +691,22 @@ mod tests {
         EvidenceBundle,
         DateTime<Utc>,
     ) {
+        fixture_with_profile(status, reason, pcr0, None, None)
+    }
+
+    fn fixture_with_profile(
+        status: Status,
+        reason: &str,
+        pcr0: &str,
+        e2e_mode: Option<E2eMode>,
+        tls: Option<TlsBindingResult>,
+    ) -> (
+        ConfigDocument,
+        canary_core::keys::KeysDocument,
+        Statement,
+        EvidenceBundle,
+        DateTime<Utc>,
+    ) {
         let config = ConfigDocument::new(Config {
             version: 0,
             node_id: "caution-canary-demo".to_owned(),
@@ -692,6 +716,7 @@ mod tests {
                 id: "payments-prod".to_owned(),
                 name: "Payments production".to_owned(),
                 attestation_url: "https://payments.example.com/attestation".to_owned(),
+                e2e_mode,
                 expected_pcrs: ExpectedPcrs {
                     pcr0: pcr0.to_owned(),
                     pcr1: PCR_0_AND_1.to_owned(),
@@ -712,13 +737,14 @@ mod tests {
         .unwrap();
         let statement = sign_statement(
             Payload {
-                claim_type: CLAIM_TYPE.to_owned(),
+                claim_type: claim_type_for_e2e_mode(e2e_mode).to_owned(),
                 target_id: "payments-prod".to_owned(),
                 target_origin: "https://payments.example.com".to_owned(),
                 status,
                 reason: reason.to_owned(),
                 config_digest: config.config_digest.clone(),
                 evidence_digest: Some(evidence.evidence_digest.clone()),
+                tls,
                 observed_at: Some(evidence.observed_at.clone()),
                 issued_at: evidence.observed_at.clone(),
                 expires_at: (observed + Duration::seconds(180)).to_rfc3339(),
@@ -809,6 +835,125 @@ mod tests {
         assert!(historical.contains(&format!("PCR0 observed           {PCR_0_AND_1}")));
         assert!(historical.contains(&format!("PCR0 expected           {PCR_0_AND_1}")));
         assert!(historical.contains("PCR0 comparison         PASS"));
+    }
+
+    #[test]
+    fn caddy_claim_replays_nitro_policy_and_validates_signed_tls_comparison() {
+        let matching_tls = TlsBindingResult {
+            attested_mode: "caddy".to_owned(),
+            attested_domain: "payments.example.com".to_owned(),
+            attested_certfp: "a".repeat(64),
+            observed_certfp: "a".repeat(64),
+        };
+        let (config, keys, statement, evidence, now) = fixture_with_profile(
+            Status::Verified,
+            "ALL_CHECKS_PASSED",
+            PCR_0_AND_1,
+            Some(E2eMode::Caddy),
+            Some(matching_tls.clone()),
+        );
+        let report = verify_target_artifacts(
+            &config,
+            &keys,
+            &config.config.targets[0],
+            &statement,
+            Some(&evidence),
+            now,
+        )
+        .unwrap();
+        assert_eq!(report.status, Status::Verified);
+        assert_eq!(report.statement.payload.tls, Some(matching_tls));
+        let outcome = outcome_for(report, "ATTESTED", "stable");
+        assert!(outcome
+            .concise_text()
+            .contains("PCR0/1/2 + TLS binding + signatures"));
+        assert!(outcome
+            .concise_text()
+            .contains("TLS caddy payments.example.com PASS"));
+        assert!(outcome
+            .concise_text()
+            .contains(&format!("cert sha256:{}", "a".repeat(64))));
+        assert_eq!(
+            outcome.json_result()["deployments"][0]["tls"]["attested_mode"],
+            "caddy"
+        );
+    }
+
+    #[test]
+    fn caddy_tls_mismatch_is_an_authenticated_negative_after_nitro_passes() {
+        let mismatched_tls = TlsBindingResult {
+            attested_mode: "caddy".to_owned(),
+            attested_domain: "payments.example.com".to_owned(),
+            attested_certfp: "a".repeat(64),
+            observed_certfp: "b".repeat(64),
+        };
+        let (config, keys, statement, evidence, now) = fixture_with_profile(
+            Status::Failed,
+            TLS_BINDING_MISMATCH_REASON,
+            PCR_0_AND_1,
+            Some(E2eMode::Caddy),
+            Some(mismatched_tls.clone()),
+        );
+        let report = verify_target_artifacts(
+            &config,
+            &keys,
+            &config.config.targets[0],
+            &statement,
+            Some(&evidence),
+            now,
+        )
+        .unwrap();
+        assert_eq!(report.status, Status::Failed);
+        assert_eq!(report.reason, TLS_BINDING_MISMATCH_REASON);
+        assert_eq!(report.statement.payload.tls, Some(mismatched_tls));
+        assert!(report.pcr_claims.is_some());
+        let output = outcome_for(report, "ATTESTED", "stable").concise_text();
+        assert!(output.contains("TLS caddy payments.example.com MISMATCH"));
+        assert!(output.contains(&format!("attested sha256:{}", "a".repeat(64))));
+        assert!(output.contains(&format!("observed sha256:{}", "b".repeat(64))));
+    }
+
+    #[test]
+    fn caddy_base_attestation_failure_does_not_claim_tls_was_compared() {
+        let wrong_pcr = format!("{}0", &PCR_0_AND_1[..PCR_0_AND_1.len() - 1]);
+        let (config, keys, statement, evidence, now) = fixture_with_profile(
+            Status::Failed,
+            "PCR_MISMATCH",
+            &wrong_pcr,
+            Some(E2eMode::Caddy),
+            None,
+        );
+        let report = verify_target_artifacts(
+            &config,
+            &keys,
+            &config.config.targets[0],
+            &statement,
+            Some(&evidence),
+            now,
+        )
+        .unwrap();
+        let rendered = target_report_text(&config.config.targets[0], &report, NodeTrust::Attested);
+        assert!(rendered.contains("TLS/attestation binding NOT EVALUATED"));
+        assert!(!rendered.contains("TLS/attestation binding MISMATCH"));
+        let concise = outcome_for(report, "ATTESTED", "stable").concise_text();
+        assert!(concise.contains("TLS binding NOT EVALUATED"));
+    }
+
+    #[test]
+    fn configured_caddy_profile_rejects_a_pcr_only_claim() {
+        let (mut config, keys, statement, evidence, now) =
+            fixture(Status::Verified, "ALL_CHECKS_PASSED", PCR_0_AND_1);
+        config.config.targets[0].e2e_mode = Some(E2eMode::Caddy);
+        let error = verify_target_artifacts(
+            &config,
+            &keys,
+            &config.config.targets[0],
+            &statement,
+            Some(&evidence),
+            now,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("claim_type"));
     }
 
     #[test]
@@ -926,7 +1071,7 @@ mod tests {
         .unwrap();
         let attested = outcome_for(verified_report, "ATTESTED", "stable");
         let text = attested.concise_text();
-        assert!(text.contains("VERIFIED  1/1 deployment"));
+        assert!(text.contains("VERIFIED  1/1 target"));
         assert!(text.contains("Canary: ATTESTED (stable identity)"));
         assert!(text.contains("PCR0/1/2 + signatures"));
         assert!(text.contains("  PCR0 ef09...cc03  MATCH"));
@@ -970,7 +1115,7 @@ mod tests {
         .unwrap();
         let tofu_negative = outcome_for(failed_report, "TOFU", "unknown");
         let text = tofu_negative.concise_text();
-        assert!(text.contains("NOT VERIFIED  0/1 deployment"));
+        assert!(text.contains("NOT VERIFIED  0/1 target"));
         assert!(text.contains("identity/config not independently authenticated"));
         assert!(text.contains("payments-prod  FAILED  PCR_MISMATCH"));
         assert!(text.contains(&format!(

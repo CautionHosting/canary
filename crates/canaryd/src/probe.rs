@@ -9,17 +9,19 @@ use std::time::{Duration, Instant};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use canary_core::canonical::digest_canonical;
-use canary_core::config::Target;
+use canary_core::config::{dns_hostname, E2eMode, Target};
 use canary_core::evidence::{
     evidence_digest, pcrs_from_hex, verify_evidence, AuthenticatedPcrClaims, EvidenceBundle,
     ProbeReason, EVIDENCE_PROTOCOL,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use rand::RngCore;
+use reqwest::tls::TlsInfo;
 use serde::Deserialize;
 use thiserror::Error;
 
 use crate::network::{resolve_and_pin, PinnedTarget, Resolver};
+use canary_core::tls_binding::{evaluate_caddy_binding, TlsBindingResult};
 
 /// Fixed V0 network limits. They are deliberately code constants, never live
 /// configuration (approved Phase 2 decision 4).
@@ -50,6 +52,7 @@ pub struct ProbeAttempt {
     pub evidence_claims: Option<AuthenticatedPcrClaims>,
     pub evidence_digest: Option<String>,
     pub manifest_digest: Option<String>,
+    pub tls: Option<TlsBindingResult>,
 }
 
 impl ProbeAttempt {
@@ -72,6 +75,7 @@ impl ProbeAttempt {
             evidence_claims: None,
             evidence_digest: None,
             manifest_digest: None,
+            tls: None,
         }
     }
 
@@ -96,6 +100,7 @@ impl ProbeAttempt {
             manifest_digest: Some(evidence.manifest_digest.clone()),
             evidence: Some(evidence),
             evidence_claims,
+            tls: None,
         }
     }
 
@@ -119,6 +124,7 @@ impl ProbeAttempt {
             evidence_claims: None,
             evidence_digest: None,
             manifest_digest: None,
+            tls: None,
         }
     }
 
@@ -147,6 +153,7 @@ impl ProbeAttempt {
             evidence_claims: None,
             evidence_digest: None,
             manifest_digest: None,
+            tls: None,
         }
     }
 }
@@ -156,6 +163,8 @@ impl ProbeAttempt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
     pub body: Vec<u8>,
+    /// Leaf DER from the exact TLS connection carrying `body`.
+    pub peer_certificate_der: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Error)]
@@ -216,6 +225,11 @@ impl ProbeTransport for ReqwestTransport {
             .send()
             .await
             .map_err(TransportError::Request)?;
+        let peer_certificate_der = response
+            .extensions()
+            .get::<TlsInfo>()
+            .and_then(TlsInfo::peer_certificate)
+            .map(<[u8]>::to_vec);
         if !response.status().is_success() {
             return Err(TransportError::HttpStatus(response.status().as_u16()));
         }
@@ -230,7 +244,10 @@ impl ProbeTransport for ReqwestTransport {
         while let Some(chunk) = response.chunk().await.map_err(TransportError::Request)? {
             append_bounded(&mut body, &chunk)?;
         }
-        Ok(HttpResponse { body })
+        Ok(HttpResponse {
+            body,
+            peer_certificate_der,
+        })
     }
 }
 
@@ -253,6 +270,7 @@ fn pinned_client(target: &PinnedTarget) -> Result<reqwest::Client, TransportErro
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(ATTEMPT_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
+        .tls_info(true)
         // The URL remains host-based, so reqwest uses `hostname` for Host and
         // TLS SNI; only the actual TCP peer is pinned to this socket.
         .resolve(&target.hostname, target.socket)
@@ -374,7 +392,11 @@ async fn probe_with_nonce_inner<R: Resolver, T: ProbeTransport>(
         Ok(Ok(response)) => response,
     };
 
-    let response = match serde_json::from_slice::<BootproofResponse>(&response.body) {
+    let HttpResponse {
+        body,
+        peer_certificate_der,
+    } = response;
+    let response = match serde_json::from_slice::<BootproofResponse>(&body) {
         Ok(response) => response,
         Err(_) => return ProbeAttempt::malformed(&target.id, attempted_at, completed_at, latency),
     };
@@ -424,15 +446,35 @@ async fn probe_with_nonce_inner<R: Resolver, T: ProbeTransport>(
         .map(Duration::from_secs)
         .unwrap_or(Duration::ZERO);
     let verification = verify_evidence(&document, &expected_pcrs, &nonce, now);
-    ProbeAttempt::definitive(
+    let (reason, tls) = if verification.passed && target.e2e_mode == Some(E2eMode::Caddy) {
+        let expected_domain = dns_hostname(&target.attestation_url);
+        match (
+            expected_domain,
+            evaluate_caddy_binding(
+                verification.user_data.as_deref(),
+                peer_certificate_der.as_deref(),
+            ),
+        ) {
+            (Some(expected_domain), Some(tls)) if tls.matches(&expected_domain) => {
+                (ProbeReason::AllChecksPassed, Some(tls))
+            }
+            (_, Some(tls)) => (ProbeReason::TlsBindingMismatch, Some(tls)),
+            (_, None) => (ProbeReason::TlsBindingMismatch, None),
+        }
+    } else {
+        (verification.reason, None)
+    };
+    let mut attempt = ProbeAttempt::definitive(
         &target.id,
         attempted_at,
         completed_at,
         latency,
-        verification.reason,
+        reason,
         evidence,
         verification.pcr_claims,
-    )
+    );
+    attempt.tls = tls;
+    attempt
 }
 
 fn decode_canonical_document(document: &str) -> Result<Vec<u8>, ()> {
@@ -491,6 +533,7 @@ mod tests {
             id: "payments-prod".to_owned(),
             name: "Payments".to_owned(),
             attestation_url: "https://target.example/attestation".to_owned(),
+            e2e_mode: None,
             expected_pcrs: canary_core::config::ExpectedPcrs {
                 pcr0: "aa".repeat(48),
                 pcr1: "bb".repeat(48),
@@ -504,6 +547,7 @@ mod tests {
             id: "aws-test".to_owned(),
             name: "AWS test fixture".to_owned(),
             attestation_url: "https://target.example/attestation".to_owned(),
+            e2e_mode: None,
             expected_pcrs: canary_core::config::ExpectedPcrs {
                 pcr0: FIXTURE_PCR_0_AND_1.to_owned(),
                 pcr1: FIXTURE_PCR_0_AND_1.to_owned(),
@@ -519,6 +563,7 @@ mod tests {
                 "manifest": {},
             }))
             .unwrap(),
+            peer_certificate_der: None,
         }
     }
 
@@ -559,6 +604,7 @@ mod tests {
             &resolver,
             &FakeTransport(Ok(HttpResponse {
                 body: br#"{"document":"not base64","manifest":{}}"#.to_vec(),
+                peer_certificate_der: None,
             })),
             &target(),
             Utc::now(),
@@ -610,6 +656,76 @@ mod tests {
         assert!(attempt.completed_at >= before);
         assert!(attempt.completed_at <= after);
         assert_eq!(attempt.observed_at, Some(attempt.completed_at));
+    }
+
+    #[tokio::test]
+    async fn caddy_profile_fails_closed_when_authenticated_metadata_is_absent() {
+        let resolver = FakeResolver(Ok(vec!["8.8.8.8:443".parse().unwrap()]));
+        let mut target = fixture_target();
+        target.e2e_mode = Some(E2eMode::Caddy);
+        let mut response = fixture_response();
+        response.peer_certificate_der = Some(b"leaf certificate DER".to_vec());
+        let observation_time = Utc.timestamp_opt(FIXTURE_TIME_SECONDS, 0).single().unwrap();
+        let attempt = probe_with_nonce_at(
+            &resolver,
+            &FakeTransport(Ok(response)),
+            &target,
+            observation_time,
+            fixture_nonce(),
+            observation_time,
+        )
+        .await;
+
+        assert_eq!(attempt.reason, ProbeReason::TlsBindingMismatch);
+        assert!(attempt.evidence.is_some());
+        assert!(attempt.evidence_claims.is_some());
+        assert!(attempt.tls.is_none());
+    }
+
+    #[tokio::test]
+    async fn caddy_binding_is_evaluated_only_after_base_attestation_policy() {
+        let resolver = FakeResolver(Ok(vec!["8.8.8.8:443".parse().unwrap()]));
+        let observation_time = Utc.timestamp_opt(FIXTURE_TIME_SECONDS, 0).single().unwrap();
+        let mut target = fixture_target();
+        target.e2e_mode = Some(E2eMode::Caddy);
+        target.expected_pcrs.pcr0 = "a".repeat(96);
+        let pcr_mismatch = probe_with_nonce_at(
+            &resolver,
+            &FakeTransport(Ok(fixture_response())),
+            &target,
+            observation_time,
+            fixture_nonce(),
+            observation_time,
+        )
+        .await;
+        assert_eq!(pcr_mismatch.reason, ProbeReason::PcrMismatch);
+        assert!(pcr_mismatch.tls.is_none());
+
+        target.expected_pcrs = fixture_target().expected_pcrs;
+        let nonce_mismatch = probe_with_nonce_at(
+            &resolver,
+            &FakeTransport(Ok(fixture_response())),
+            &target,
+            observation_time,
+            [0; 32],
+            observation_time,
+        )
+        .await;
+        assert_eq!(nonce_mismatch.reason, ProbeReason::NonceMismatch);
+        assert!(nonce_mismatch.tls.is_none());
+
+        target.expected_pcrs.pcr0 = "0".repeat(96);
+        let debug_policy = probe_with_nonce_at(
+            &resolver,
+            &FakeTransport(Ok(fixture_response())),
+            &target,
+            observation_time,
+            fixture_nonce(),
+            observation_time,
+        )
+        .await;
+        assert_eq!(debug_policy.reason, ProbeReason::DebugOrZeroPcr);
+        assert!(debug_policy.tls.is_none());
     }
 
     #[test]

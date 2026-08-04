@@ -1,4 +1,4 @@
-//! `canaryctl enroll` — verify Canary's measured config/key binding.
+//! `canaryctl save-canary-keys` — verify Canary and save its authenticated keys.
 
 use std::fs::OpenOptions;
 use std::io::{Read as _, Write as _};
@@ -52,7 +52,7 @@ pub(crate) enum NodeTrust {
     UnattestedDev,
 }
 
-pub(crate) struct EnrollmentOutcome {
+pub(crate) struct SaveKeysOutcome {
     pub(crate) node_id: String,
     pub(crate) config_digest: String,
     pub(crate) keyset_digest: String,
@@ -60,7 +60,7 @@ pub(crate) struct EnrollmentOutcome {
     identity: Option<IdentityMode>,
 }
 
-impl EnrollmentOutcome {
+impl SaveKeysOutcome {
     pub(crate) fn trust_name(&self) -> &'static str {
         match self.trust {
             NodeTrust::Attested => "ATTESTED",
@@ -84,7 +84,7 @@ impl EnrollmentOutcome {
             }
         };
         format!(
-            "ENROLLED {}\n  trust: {}\n  identity: {}\n  keys: {}\n  config_digest: {}\n  keyset_digest: {}",
+            "VERIFIED AND SAVED CANARY KEYS {}\n  trust: {}\n  identity: {}\n  output: {}\n  config_digest: {}\n  keyset_digest: {}",
             self.node_id,
             trust,
             self.identity_name(),
@@ -96,6 +96,10 @@ impl EnrollmentOutcome {
 }
 
 impl InspectedNode {
+    pub(crate) fn uses_http(&self) -> bool {
+        self.base.scheme() == "http"
+    }
+
     pub(crate) fn get_json<T: DeserializeOwned>(&self, segments: &[&str]) -> Result<T> {
         let bytes = get(&self.agent, relative_endpoint(&self.base, segments)?)?;
         serde_json::from_slice(&bytes).context("parsing strict JSON API response")
@@ -117,7 +121,7 @@ impl InspectedNode {
         write_verified_keys(path, &self.keys_bytes)
     }
 
-    /// Require an operator-enrolled key document to exactly match the live
+    /// Require an operator-saved key document to exactly match the live
     /// canonical keyset. In stable attested mode this adds continuity to the
     /// fresh binding; in ephemeral mode it pins the current process; in demo
     /// mode it is the sole TOFU key pin.
@@ -132,13 +136,13 @@ impl InspectedNode {
             .with_context(|| format!("canonicalizing pinned Canary keys {}", path.display()))?;
         if canonical != pinned_bytes {
             bail!(
-                "pinned Canary keys {} are not exact RFC 8785 canonical bytes; use canaryctl enroll --keys",
+                "pinned Canary keys {} are not exact RFC 8785 canonical bytes; use canaryctl save-canary-keys --output",
                 path.display()
             );
         }
         if pinned_bytes != self.keys_bytes {
             bail!(
-                "live Canary keyset does not match pinned --keys {}; refuse key substitution or unapproved rotation",
+                "live Canary keyset does not match --trusted-keys {}; refuse key substitution or unapproved rotation",
                 path.display()
             );
         }
@@ -151,27 +155,31 @@ enum TrustMode<'a> {
     UnattestedDev,
 }
 
-pub(crate) fn enroll(
+pub(crate) fn verify_and_save_keys(
     base_url: &str,
     pcrs_file: Option<&Path>,
-    insecure: bool,
+    skip_canary_attestation: bool,
+    allow_http: bool,
     keys_out: &Path,
-) -> Result<EnrollmentOutcome> {
+) -> Result<SaveKeysOutcome> {
     if keys_out.exists() {
         bail!(
-            "refusing to overwrite existing --keys {}; choose a new path",
+            "refusing to overwrite existing --output {}; choose a new path",
             keys_out.display()
         );
     }
-    let mode = select_trust_mode(pcrs_file, insecure)?;
+    if allow_http && !skip_canary_attestation {
+        bail!("--allow-http requires --skip-canary-attestation");
+    }
+    let mode = select_trust_mode(pcrs_file, skip_canary_attestation)?;
     let inspected = match mode {
         TrustMode::TrustedPcrs(path) => inspect(base_url, path)?,
-        TrustMode::UnattestedDev => inspect_unattested(base_url)?,
+        TrustMode::UnattestedDev => inspect_unattested(base_url, allow_http)?,
     };
     inspected
         .write_keys(keys_out)
         .with_context(|| format!("writing verified keys {}", keys_out.display()))?;
-    Ok(EnrollmentOutcome {
+    Ok(SaveKeysOutcome {
         node_id: inspected.config.config.node_id.clone(),
         config_digest: inspected.config.config_digest.clone(),
         keyset_digest: digest(&inspected.keys_bytes),
@@ -229,8 +237,8 @@ pub(crate) fn inspect(base_url: &str, pcrs_file: &Path) -> Result<InspectedNode>
     Ok(inspected)
 }
 
-pub(crate) fn inspect_unattested(base_url: &str) -> Result<InspectedNode> {
-    let inspected = fetch_public_documents(base_url, true)?;
+pub(crate) fn inspect_unattested(base_url: &str, allow_http: bool) -> Result<InspectedNode> {
+    let inspected = fetch_public_documents(base_url, allow_http)?;
     validate_public_documents(&inspected.config, &inspected.keys, &inspected.keys_bytes)?;
     Ok(inspected)
 }
@@ -314,7 +322,7 @@ fn validate_public_documents(
 fn write_verified_keys(path: &Path, keys_bytes: &[u8]) -> Result<()> {
     if path.exists() {
         bail!(
-            "refusing to overwrite existing --keys {}; choose a new path",
+            "refusing to overwrite existing --output {}; choose a new path",
             path.display()
         );
     }
@@ -398,7 +406,7 @@ fn write_keys_no_clobber_with_suffixes(
     let name = path
         .file_name()
         .and_then(|value| value.to_str())
-        .context("--keys must have a UTF-8 file name")?;
+        .context("--output must have a UTF-8 file name")?;
 
     let mut created = None;
     for _ in 0..MAX_TEMPORARY_ATTEMPTS {
@@ -432,7 +440,7 @@ fn write_keys_no_clobber_with_suffixes(
         drop(file);
         std::fs::hard_link(&temporary, path).with_context(|| {
             format!(
-                "creating --keys {} without replacing an existing file",
+                "creating --output {} without replacing an existing file",
                 path.display()
             )
         })?;
@@ -450,12 +458,15 @@ fn write_keys_no_clobber_with_suffixes(
     result
 }
 
-fn select_trust_mode(pcrs_file: Option<&Path>, insecure: bool) -> Result<TrustMode<'_>> {
-    match (pcrs_file, insecure) {
+fn select_trust_mode(
+    pcrs_file: Option<&Path>,
+    skip_canary_attestation: bool,
+) -> Result<TrustMode<'_>> {
+    match (pcrs_file, skip_canary_attestation) {
         (Some(path), false) => Ok(TrustMode::TrustedPcrs(path)),
         (None, true) => Ok(TrustMode::UnattestedDev),
         (Some(_), true) | (None, false) => {
-            bail!("pass exactly one of --pcrs or --insecure")
+            bail!("pass exactly one of --expected-pcrs or --skip-canary-attestation")
         }
     }
 }
@@ -470,7 +481,7 @@ fn http_agent(allow_http: bool) -> ureq::Agent {
 }
 
 fn parse_base_url(value: &str, allow_http: bool) -> Result<Url> {
-    let mut url = Url::parse(value).context("parsing --url")?;
+    let mut url = Url::parse(value).context("parsing --canary-url")?;
     let valid_scheme = url.scheme() == "https" || (allow_http && url.scheme() == "http");
     if !valid_scheme
         || url.host_str().is_none()
@@ -481,9 +492,9 @@ fn parse_base_url(value: &str, allow_http: bool) -> Result<Url> {
         || (url.path() != "/" && !url.path().is_empty())
     {
         if allow_http {
-            bail!("--url must be an HTTP or HTTPS origin with no credentials, query, fragment, or path");
+            bail!("--canary-url must be an HTTP or HTTPS origin with no credentials, query, fragment, or path");
         }
-        bail!("--url must be an HTTPS origin with no credentials, query, fragment, or path");
+        bail!("--canary-url must be an HTTPS origin with no credentials, query, fragment, or path");
     }
     url.set_path("/");
     Ok(url)
@@ -605,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn insecure_mode_alone_allows_http_without_attestation() {
+    fn skipped_attestation_is_distinct_from_http_permission() {
         let path = Path::new("trusted_hashes.json");
         assert!(matches!(
             select_trust_mode(Some(path), false).unwrap(),
@@ -622,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn insecure_inspection_fetches_only_public_documents() {
+    fn unattested_inspection_fetches_only_public_documents() {
         let (config, _, keys_bytes, _) = binding_fixture();
         let config_bytes = serde_json::to_vec(&config).unwrap();
         let mut paths = Vec::new();

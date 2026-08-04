@@ -1,4 +1,4 @@
-//! `canaryctl identity create` (spec §8.1, §15 step 3).
+//! `canaryctl create-signing-seed` (spec §8.1, §15 step 3).
 //!
 //! Generates the single random 32-byte `CANARY_MASTER_SEED` root secret from
 //! the OS CSPRNG and writes it to a local `.env`-style file for later

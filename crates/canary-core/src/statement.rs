@@ -1,7 +1,8 @@
 //! Hybrid-signed statement envelope: signing and verification (spec §9, §3, §10).
 //!
 //! A statement is the signed, canonical claim that a Canary emits about one
-//! target: `caution.canary.pcr-match.v0`. The signed bytes are the fixed
+//! target. V0 has PCR-only and opt-in Caddy TLS-bound claim profiles. The
+//! signed bytes are the fixed
 //! domain prefix `"caution.canary.statement.v0\0"` concatenated with the
 //! RFC 8785 canonical JSON of the payload (not the whole envelope). Both
 //! Ed25519 and ML-DSA-65 sign those exact bytes; V0 verification requires
@@ -14,14 +15,16 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::canonical::{canonicalize, CanonicalError};
-use crate::config::is_valid_identifier;
+use crate::config::{dns_hostname, is_valid_identifier, E2eMode};
 use crate::keys::{base64url_nopad, verify_ed25519, verify_ml_dsa, KeyError, KeySet, KEY_EPOCH};
+use crate::tls_binding::{TlsBindingResult, TLS_BINDING_MISMATCH_REASON};
 
 /// Domain-separation prefix for the signed message (spec §9).
 const SIGN_PREFIX: &[u8] = b"caution.canary.statement.v0\0";
 
-/// The only claim type in V0 (spec §3).
+/// PCR-only V0 claim type (spec §3).
 pub const CLAIM_TYPE: &str = "caution.canary.pcr-match.v0";
+pub const CADDY_CLAIM_TYPE: &str = "caution.canary.caddy-tls-bound.v0";
 
 const ALG_ED25519: &str = "Ed25519";
 const ALG_ML_DSA_65: &str = "ML-DSA-65";
@@ -90,6 +93,8 @@ pub struct Payload {
     pub reason: String,
     pub config_digest: String,
     pub evidence_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsBindingResult>,
     pub observed_at: Option<String>,
     pub issued_at: String,
     pub expires_at: String,
@@ -159,9 +164,9 @@ fn is_canonical_https_origin(value: &str) -> bool {
 }
 
 fn validate_identity_origin_and_digests(payload: &Payload) -> Result<(), StatementError> {
-    if payload.claim_type != CLAIM_TYPE {
+    if payload.claim_type != CLAIM_TYPE && payload.claim_type != CADDY_CLAIM_TYPE {
         return Err(StatementError::InvalidPayload(format!(
-            "claim_type must be {CLAIM_TYPE:?}"
+            "claim_type must be {CLAIM_TYPE:?} or {CADDY_CLAIM_TYPE:?}"
         )));
     }
     if payload.key_epoch != KEY_EPOCH {
@@ -247,6 +252,70 @@ fn validate_status_reason(payload: &Payload) -> Result<(), StatementError> {
             "ALL_CHECKS_PASSED is valid only for VERIFIED".to_string(),
         ));
     }
+    if payload.reason == TLS_BINDING_MISMATCH_REASON
+        && (payload.claim_type != CADDY_CLAIM_TYPE || payload.status != Status::Failed)
+    {
+        return Err(StatementError::InvalidPayload(
+            "TLS_BINDING_MISMATCH requires a FAILED Caddy TLS claim".to_string(),
+        ));
+    }
+    if payload.reason == TLS_BINDING_MISMATCH_REASON && payload.evidence_digest.is_none() {
+        return Err(StatementError::InvalidPayload(
+            "TLS_BINDING_MISMATCH requires verified evidence".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tls_binding(payload: &Payload) -> Result<(), StatementError> {
+    if payload.claim_type == CLAIM_TYPE {
+        if payload.tls.is_some() {
+            return Err(StatementError::InvalidPayload(
+                "PCR-only claims must not carry TLS binding results".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    if let Some(tls) = &payload.tls {
+        if !tls.is_well_formed() {
+            return Err(StatementError::InvalidPayload(
+                "TLS binding result is not canonical".to_string(),
+            ));
+        }
+        if payload.reason != "ALL_CHECKS_PASSED" && payload.reason != TLS_BINDING_MISMATCH_REASON {
+            return Err(StatementError::InvalidPayload(
+                "TLS binding results require ALL_CHECKS_PASSED or TLS_BINDING_MISMATCH".to_string(),
+            ));
+        }
+    }
+
+    let expected_domain = dns_hostname(&payload.target_origin).ok_or_else(|| {
+        StatementError::InvalidPayload("Caddy TLS claim target_origin has no hostname".to_string())
+    })?;
+    if payload.status == Status::Verified {
+        let tls = payload.tls.as_ref().ok_or_else(|| {
+            StatementError::InvalidPayload(
+                "VERIFIED Caddy TLS claims require a TLS binding result".to_string(),
+            )
+        })?;
+        if !tls.matches(&expected_domain) {
+            return Err(StatementError::InvalidPayload(
+                "VERIFIED Caddy TLS claim does not bind its target domain and certificate"
+                    .to_string(),
+            ));
+        }
+    }
+    if payload.reason == TLS_BINDING_MISMATCH_REASON
+        && payload
+            .tls
+            .as_ref()
+            .is_some_and(|tls| tls.matches(&expected_domain))
+    {
+        return Err(StatementError::InvalidPayload(
+            "TLS_BINDING_MISMATCH is contradicted by matching TLS binding results".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -280,9 +349,17 @@ fn validate_payload(payload: &Payload) -> Result<(DateTime<Utc>, DateTime<Utc>),
     let expires_at = parse_timestamp(&payload.expires_at)?;
     let definitive_timestamp = validate_status_evidence(payload, issued_at)?;
     validate_status_reason(payload)?;
+    validate_tls_binding(payload)?;
     validate_expiry_timestamps(issued_at, expires_at, definitive_timestamp)?;
 
     Ok((issued_at, expires_at))
+}
+
+pub const fn claim_type_for_e2e_mode(mode: Option<E2eMode>) -> &'static str {
+    match mode {
+        Some(E2eMode::Caddy) => CADDY_CLAIM_TYPE,
+        None => CLAIM_TYPE,
+    }
 }
 
 /// Sign `payload` with both Ed25519 and ML-DSA-65 from `keyset`, producing
@@ -427,6 +504,7 @@ mod tests {
             reason: "ALL_CHECKS_PASSED".to_string(),
             config_digest: format!("sha256:{}", "a".repeat(64)),
             evidence_digest: Some(format!("sha256:{}", "b".repeat(64))),
+            tls: None,
             observed_at: Some("2026-07-17T12:00:00Z".to_string()),
             issued_at: "2026-07-17T12:00:00Z".to_string(),
             expires_at: "2026-07-17T12:03:00Z".to_string(),
@@ -444,6 +522,7 @@ mod tests {
             reason: "UNREACHABLE".to_string(),
             config_digest: format!("sha256:{}", "a".repeat(64)),
             evidence_digest: None,
+            tls: None,
             observed_at: None,
             issued_at: "2026-07-17T12:00:00Z".to_string(),
             expires_at: "2026-07-17T12:03:00Z".to_string(),
@@ -615,6 +694,64 @@ mod tests {
     }
 
     #[test]
+    fn caddy_claim_requires_a_matching_signed_tls_result() {
+        let mut payload = verified_payload();
+        payload.claim_type = CADDY_CLAIM_TYPE.to_owned();
+        payload.tls = Some(TlsBindingResult {
+            attested_mode: "caddy".to_owned(),
+            attested_domain: "payments.example.com".to_owned(),
+            attested_certfp: "c".repeat(64),
+            observed_certfp: "c".repeat(64),
+        });
+        sign_statement(payload.clone(), &test_keyset()).unwrap();
+
+        payload.tls.as_mut().unwrap().observed_certfp = "d".repeat(64);
+        assert!(sign_statement(payload, &test_keyset())
+            .unwrap_err()
+            .to_string()
+            .contains("does not bind"));
+    }
+
+    #[test]
+    fn caddy_mismatch_can_sign_diagnostics_or_missing_metadata() {
+        let mut payload = verified_payload();
+        payload.claim_type = CADDY_CLAIM_TYPE.to_owned();
+        payload.status = Status::Failed;
+        payload.reason = TLS_BINDING_MISMATCH_REASON.to_owned();
+        payload.tls = Some(TlsBindingResult {
+            attested_mode: "caddy".to_owned(),
+            attested_domain: "payments.example.com".to_owned(),
+            attested_certfp: "c".repeat(64),
+            observed_certfp: "d".repeat(64),
+        });
+        sign_statement(payload.clone(), &test_keyset()).unwrap();
+
+        payload.tls = None;
+        sign_statement(payload.clone(), &test_keyset()).unwrap();
+
+        payload.evidence_digest = None;
+        assert!(sign_statement(payload, &test_keyset())
+            .unwrap_err()
+            .to_string()
+            .contains("requires verified evidence"));
+    }
+
+    #[test]
+    fn pcr_claim_cannot_smuggle_tls_results() {
+        let mut payload = verified_payload();
+        payload.tls = Some(TlsBindingResult {
+            attested_mode: "caddy".to_owned(),
+            attested_domain: "payments.example.com".to_owned(),
+            attested_certfp: "c".repeat(64),
+            observed_certfp: "c".repeat(64),
+        });
+        assert!(sign_statement(payload, &test_keyset())
+            .unwrap_err()
+            .to_string()
+            .contains("PCR-only"));
+    }
+
+    #[test]
     fn published_statement_vector_reproduces_byte_for_byte() {
         let seed_b64 = STANDARD.encode([0x11u8; 32]);
         let seed = MasterSeed::from_base64(&seed_b64).unwrap();
@@ -687,7 +824,7 @@ mod tests {
             (
                 "claim type",
                 |payload| payload.claim_type = "not-the-v0-claim".to_string(),
-                "claim_type must be \"caution.canary.pcr-match.v0\"",
+                "claim_type must be \"caution.canary.pcr-match.v0\" or \"caution.canary.caddy-tls-bound.v0\"",
             ),
             (
                 "key epoch",

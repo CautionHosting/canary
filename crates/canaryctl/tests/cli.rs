@@ -67,15 +67,14 @@ fn write_trusted_pcrs(path: &Path) {
 }
 
 #[test]
-fn deployment_add_refuses_silent_replacement_and_allows_explicit_replace() {
+fn add_target_refuses_silent_replacement_and_allows_explicit_replace() {
     let dir = TempDir::new("config");
     let config = dir.join("canary.json");
     let pcrs = dir.join("trusted_hashes.json");
     write_trusted_pcrs(&pcrs);
 
     let first = run(&[
-        "deployment",
-        "add",
+        "add-target",
         "--config",
         path_arg(&config),
         "--canary-id",
@@ -84,9 +83,9 @@ fn deployment_add_refuses_silent_replacement_and_allows_explicit_replace() {
         "payments-prod",
         "--name",
         "Payments production",
-        "--url",
+        "--attestation-url",
         "https://payments.example.com/attestation",
-        "--pcrs",
+        "--expected-pcrs",
         path_arg(&pcrs),
     ]);
     assert!(
@@ -97,34 +96,32 @@ fn deployment_add_refuses_silent_replacement_and_allows_explicit_replace() {
     let baseline = std::fs::read(&config).unwrap();
 
     let refused = run(&[
-        "deployment",
-        "add",
+        "add-target",
         "--config",
         path_arg(&config),
         "--id",
         "payments-prod",
         "--name",
         "Replacement",
-        "--url",
+        "--attestation-url",
         "https://payments.example.com/attestation",
-        "--pcrs",
+        "--expected-pcrs",
         path_arg(&pcrs),
     ]);
     assert!(!refused.status.success());
     assert_eq!(std::fs::read(&config).unwrap(), baseline);
 
     let replaced = run(&[
-        "deployment",
-        "add",
+        "add-target",
         "--config",
         path_arg(&config),
         "--id",
         "payments-prod",
         "--name",
         "Replacement",
-        "--url",
+        "--attestation-url",
         "https://payments.example.com/attestation",
-        "--pcrs",
+        "--expected-pcrs",
         path_arg(&pcrs),
         "--replace",
     ]);
@@ -135,23 +132,81 @@ fn deployment_add_refuses_silent_replacement_and_allows_explicit_replace() {
 }
 
 #[test]
-fn identity_create_process_enforces_nonoverwrite_and_permissions() {
+fn add_target_accepts_only_caddy_with_independently_supplied_pcrs() {
+    let dir = TempDir::new("caddy-config");
+    let config = dir.join("canary.json");
+    let pcrs = dir.join("trusted_hashes.json");
+    write_trusted_pcrs(&pcrs);
+
+    let added = run(&[
+        "add-target",
+        "--config",
+        path_arg(&config),
+        "--canary-id",
+        "caution-canary-demo",
+        "--id",
+        "payments-prod",
+        "--attestation-url",
+        "https://payments.example.com/attestation",
+        "--e2e-mode",
+        "caddy",
+        "--expected-pcrs",
+        path_arg(&pcrs),
+    ]);
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    assert_eq!(saved["targets"][0]["e2e_mode"], "caddy");
+
+    let unknown = run(&[
+        "add-target",
+        "--id",
+        "other",
+        "--attestation-url",
+        "https://other.example.com/attestation",
+        "--e2e-mode",
+        "steve",
+        "--expected-pcrs",
+        path_arg(&pcrs),
+    ]);
+    assert!(!unknown.status.success());
+
+    let tofu = run(&[
+        "add-target",
+        "--id",
+        "other",
+        "--attestation-url",
+        "https://other.example.com/attestation",
+        "--e2e-mode",
+        "caddy",
+        "--tofu",
+        "--accept-tofu",
+    ]);
+    assert!(!tofu.status.success());
+    assert!(String::from_utf8_lossy(&tofu.stderr).contains("cannot be used with"));
+}
+
+#[test]
+fn create_signing_seed_enforces_nonoverwrite_and_permissions() {
     let dir = TempDir::new("seed");
     let env_file = dir.join(".env");
 
-    let first = run(&["identity", "create", "--env-file", path_arg(&env_file)]);
+    let first = run(&["create-signing-seed", "--output", path_arg(&env_file)]);
     assert!(first.status.success());
     let original = std::fs::read(&env_file).unwrap();
     assert!(String::from_utf8_lossy(&original).starts_with("CANARY_MASTER_SEED="));
 
-    let refused = run(&["identity", "create", "--env-file", path_arg(&env_file)]);
+    let refused = run(&["create-signing-seed", "--output", path_arg(&env_file)]);
     assert!(!refused.status.success());
     assert_eq!(std::fs::read(&env_file).unwrap(), original);
 
     let forced = run(&[
-        "identity",
-        "create",
-        "--env-file",
+        "create-signing-seed",
+        "--output",
         path_arg(&env_file),
         "--force",
     ]);
@@ -186,6 +241,7 @@ fn offline_statement_verification_round_trips_through_cli_process() {
             reason: "ALL_CHECKS_PASSED".to_string(),
             config_digest: format!("sha256:{}", "a".repeat(64)),
             evidence_digest: Some(format!("sha256:{}", "b".repeat(64))),
+            tls: None,
             observed_at: Some(timestamp.clone()),
             issued_at: timestamp,
             expires_at: (issued + chrono::Duration::seconds(180))
@@ -208,11 +264,10 @@ fn offline_statement_verification_round_trips_through_cli_process() {
     .unwrap();
 
     let pass = run(&[
-        "artifact",
         "verify-statement",
         "--statement",
         path_arg(&statement_path),
-        "--keys",
+        "--trusted-keys",
         path_arg(&keys_path),
     ]);
     assert!(
@@ -224,11 +279,10 @@ fn offline_statement_verification_round_trips_through_cli_process() {
 
     let json_pass = run(&[
         "--json",
-        "artifact",
         "verify-statement",
         "--statement",
         path_arg(&statement_path),
-        "--keys",
+        "--trusted-keys",
         path_arg(&keys_path),
     ]);
     assert!(json_pass.status.success());
@@ -238,6 +292,16 @@ fn offline_statement_verification_round_trips_through_cli_process() {
     assert_eq!(rendered["ok"], true);
     assert!(rendered["result"]["partial"].as_bool().unwrap());
 
+    let legacy_pass = run(&[
+        "artifact",
+        "verify-statement",
+        "--statement",
+        path_arg(&statement_path),
+        "--keys",
+        path_arg(&keys_path),
+    ]);
+    assert!(legacy_pass.status.success());
+
     let mut tampered = statement;
     tampered.signers[0].signatures[0].sig = "A".to_string();
     std::fs::write(
@@ -246,11 +310,10 @@ fn offline_statement_verification_round_trips_through_cli_process() {
     )
     .unwrap();
     let fail = run(&[
-        "artifact",
         "verify-statement",
         "--statement",
         path_arg(&statement_path),
-        "--keys",
+        "--trusted-keys",
         path_arg(&keys_path),
     ]);
     assert!(!fail.status.success());
@@ -258,7 +321,7 @@ fn offline_statement_verification_round_trips_through_cli_process() {
 
 #[test]
 fn json_and_verbose_are_mutually_exclusive() {
-    let output = run(&["--json", "--verbose", "identity", "create"]);
+    let output = run(&["--json", "--verbose", "create-signing-seed"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
 }
@@ -267,11 +330,10 @@ fn json_and_verbose_are_mutually_exclusive() {
 fn parsed_json_errors_are_one_json_object() {
     let output = run(&[
         "--json",
-        "artifact",
         "verify-evidence",
         "--evidence",
         "/definitely/missing/evidence.json",
-        "--pcrs",
+        "--expected-pcrs",
         "/definitely/missing/pcrs.json",
     ]);
     assert!(!output.status.success());
@@ -313,13 +375,14 @@ fn watch_rejects_one_shot_json_output_before_loading_config() {
 }
 
 #[test]
-fn watch_exposes_one_explicit_local_testing_flag() {
+fn watch_exposes_separate_explicit_local_testing_flags() {
     let output = run(&["watch", "--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
-    assert!(help.contains("--insecure"));
-    assert!(!help.contains("--insecure-canary"));
-    assert!(!help.contains("--allow-http-webhooks"));
+    assert!(help.contains("--skip-canary-attestation"));
+    assert!(help.contains("--allow-http-canary"));
+    assert!(help.contains("--allow-http-webhooks"));
+    assert!(!help.contains("--insecure"));
 }
 
 #[test]
@@ -335,11 +398,10 @@ fn offline_evidence_verification_uses_public_fixture_and_rejects_replay() {
     write_trusted_pcrs(&pcrs_path);
 
     let pass = run(&[
-        "artifact",
         "verify-evidence",
         "--evidence",
         path_arg(&evidence_path),
-        "--pcrs",
+        "--expected-pcrs",
         path_arg(&pcrs_path),
     ]);
     assert!(
@@ -355,11 +417,10 @@ fn offline_evidence_verification_uses_public_fixture_and_rejects_replay() {
     replay["nonce"] = serde_json::Value::String(STANDARD.encode([0x10; 32]));
     std::fs::write(&evidence_path, serde_json::to_vec_pretty(&replay).unwrap()).unwrap();
     let fail = run(&[
-        "artifact",
         "verify-evidence",
         "--evidence",
         path_arg(&evidence_path),
-        "--pcrs",
+        "--expected-pcrs",
         path_arg(&pcrs_path),
     ]);
     assert!(!fail.status.success());
@@ -371,8 +432,7 @@ fn capture_rejects_http_url_before_network_or_write() {
     let dir = TempDir::new("capture-http");
     let config = dir.join("canary.json");
     let output = run(&[
-        "deployment",
-        "add",
+        "add-target",
         "--config",
         path_arg(&config),
         "--canary-id",
@@ -381,7 +441,7 @@ fn capture_rejects_http_url_before_network_or_write() {
         "payments-prod",
         "--name",
         "Payments production",
-        "--url",
+        "--attestation-url",
         "http://payments.example.com/attestation",
         "--tofu",
         "--accept-tofu",
@@ -391,17 +451,17 @@ fn capture_rejects_http_url_before_network_or_write() {
 }
 
 #[test]
-fn enroll_rejects_non_https_origin_without_writing_keys() {
+fn save_canary_keys_rejects_non_https_origin_without_writing_keys() {
     let dir = TempDir::new("inspect-http");
     let keys = dir.join("keys.json");
     let pcrs = dir.join("trusted_hashes.json");
     let output = run(&[
-        "enroll",
-        "--url",
+        "save-canary-keys",
+        "--canary-url",
         "http://canary.example.com",
-        "--pcrs",
+        "--expected-pcrs",
         path_arg(&pcrs),
-        "--keys",
+        "--output",
         path_arg(&keys),
     ]);
     assert!(!output.status.success());
@@ -415,82 +475,322 @@ fn verification_commands_require_an_explicit_trust_mode() {
     let keys = dir.join("keys.json");
     let evidence = dir.join("evidence.json");
 
-    let enroll = run(&[
-        "enroll",
-        "--url",
+    let save_keys = run(&[
+        "save-canary-keys",
+        "--canary-url",
         "https://canary.example.com",
-        "--keys",
+        "--output",
         path_arg(&keys),
     ]);
-    assert!(!enroll.status.success());
-    let enroll_error = String::from_utf8_lossy(&enroll.stderr);
-    assert!(enroll_error.contains("--pcrs"));
-    assert!(enroll_error.contains("--insecure"));
+    assert!(!save_keys.status.success());
+    let save_keys_error = String::from_utf8_lossy(&save_keys.stderr);
+    assert!(save_keys_error.contains("--expected-pcrs"));
+    assert!(save_keys_error.contains("--skip-canary-attestation"));
 
-    let evidence = run(&[
-        "artifact",
-        "verify-evidence",
-        "--evidence",
-        path_arg(&evidence),
-    ]);
+    let evidence = run(&["verify-evidence", "--evidence", path_arg(&evidence)]);
     assert!(!evidence.status.success());
     let evidence_error = String::from_utf8_lossy(&evidence.stderr);
-    assert!(evidence_error.contains("--pcrs"));
+    assert!(evidence_error.contains("--expected-pcrs"));
 
-    let live = run(&["verify", "--url", "https://canary.example.com"]);
+    let live = run(&["verify", "--canary-url", "https://canary.example.com"]);
     assert!(!live.status.success());
     let live_error = String::from_utf8_lossy(&live.stderr);
-    assert!(live_error.contains("--pcrs"));
-    assert!(live_error.contains("--insecure"));
+    assert!(live_error.contains("--expected-pcrs"));
+    assert!(live_error.contains("--skip-canary-attestation"));
 
     let history = run(&[
-        "verify",
-        "--url",
+        "verify-attempt",
+        "--canary-url",
         "https://canary.example.com",
-        "--deployment",
+        "--target",
         "payments-prod",
         "--attempt",
         "1",
     ]);
     assert!(!history.status.success());
     let history_error = String::from_utf8_lossy(&history.stderr);
-    assert!(history_error.contains("--pcrs"));
-    assert!(history_error.contains("--insecure"));
+    assert!(history_error.contains("--expected-pcrs"));
+    assert!(history_error.contains("--skip-canary-attestation"));
 }
 
 #[test]
-fn clean_break_rejects_legacy_commands_and_flags() {
-    for legacy in [
-        "config",
-        "capture",
-        "seed",
-        "inspect-node",
-        "verify-history",
-        "verify-statement",
-    ] {
-        let output = run(&[legacy, "--help"]);
-        assert!(
-            !output.status.success(),
-            "legacy command {legacy} still works"
-        );
-    }
-    let output = run(&[
-        "deployment",
-        "add",
+fn explicit_local_flags_preserve_the_existing_trust_boundary() {
+    let dir = TempDir::new("explicit-local-flags");
+    let output = dir.join("keys.json");
+    let pcrs = dir.join("trusted_hashes.json");
+
+    let allow_without_skip = run(&[
+        "save-canary-keys",
+        "--canary-url",
+        "http://localhost:8080",
+        "--allow-http",
+        "--output",
+        path_arg(&output),
+    ]);
+    assert!(!allow_without_skip.status.success());
+    assert!(String::from_utf8_lossy(&allow_without_skip.stderr)
+        .contains("--allow-http requires --skip-canary-attestation"));
+
+    let conflicting_modes = run(&[
+        "save-canary-keys",
+        "--canary-url",
+        "https://canary.example.com",
+        "--expected-pcrs",
+        path_arg(&pcrs),
+        "--skip-canary-attestation",
+        "--output",
+        path_arg(&output),
+    ]);
+    assert!(!conflicting_modes.status.success());
+    assert!(String::from_utf8_lossy(&conflicting_modes.stderr)
+        .contains("exactly one of --expected-pcrs or --skip-canary-attestation"));
+
+    let http_without_permission = run(&[
+        "save-canary-keys",
+        "--canary-url",
+        "http://localhost:8080",
+        "--skip-canary-attestation",
+        "--output",
+        path_arg(&output),
+    ]);
+    assert!(!http_without_permission.status.success());
+    assert!(String::from_utf8_lossy(&http_without_permission.stderr)
+        .contains("--canary-url must be an HTTPS origin"));
+
+    let watch_http_without_skip = run(&[
+        "watch",
+        "--allow-http-canary",
+        "--config",
+        "/definitely/missing/canary-watch.json",
+    ]);
+    assert!(!watch_http_without_skip.status.success());
+    assert!(String::from_utf8_lossy(&watch_http_without_skip.stderr)
+        .contains("--allow-http-canary requires --skip-canary-attestation"));
+}
+
+#[test]
+fn new_commands_preserve_schema_v1_json_identifiers() {
+    let dir = TempDir::new("json-command-identifiers");
+    let env_file = dir.join(".env");
+    let seed = run(&[
+        "--json",
+        "create-signing-seed",
+        "--output",
+        path_arg(&env_file),
+    ]);
+    assert!(seed.status.success());
+    let rendered: serde_json::Value = serde_json::from_slice(&seed.stdout).unwrap();
+    assert_eq!(rendered["schema_version"], 1);
+    assert_eq!(rendered["command"], "identity.create");
+
+    let config = dir.join("canary.json");
+    let pcrs = dir.join("trusted_hashes.json");
+    write_trusted_pcrs(&pcrs);
+    let target = run(&[
+        "--json",
+        "add-target",
+        "--config",
+        path_arg(&config),
+        "--canary-id",
+        "caution-canary-demo",
         "--id",
         "payments-prod",
         "--attestation-url",
         "https://payments.example.com/attestation",
-        "--tofu",
-        "--accept-tofu",
+        "--expected-pcrs",
+        path_arg(&pcrs),
     ]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--attestation-url"));
+    assert!(target.status.success());
+    let rendered: serde_json::Value = serde_json::from_slice(&target.stdout).unwrap();
+    assert_eq!(rendered["schema_version"], 1);
+    assert_eq!(rendered["command"], "deployment.add");
+    assert_eq!(rendered["result"]["deployment"], "payments-prod");
 }
 
 #[test]
-fn verify_attempt_requires_exactly_one_deployment_before_network_access() {
-    let no_deployment = run(&[
+fn top_level_help_is_flat_and_hides_compatibility_commands() {
+    let output = run(&["--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    let visible_commands = help
+        .lines()
+        .skip_while(|line| *line != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(visible_commands.len(), 8, "unexpected command list: {help}");
+    let mut previous = 0;
+    for command in [
+        "add-target",
+        "create-signing-seed",
+        "save-canary-keys",
+        "verify",
+        "verify-attempt",
+        "watch",
+        "verify-statement",
+        "verify-evidence",
+    ] {
+        let position = help.find(command).unwrap();
+        assert!(position >= previous, "{command} is out of workflow order");
+        previous = position;
+    }
+    for legacy in ["deployment", "identity", "enroll", "artifact"] {
+        assert!(!help
+            .lines()
+            .any(|line| line.trim_start().starts_with(legacy)));
+    }
+    assert!(!visible_commands
+        .iter()
+        .any(|line| line.trim_start().starts_with("help")));
+}
+
+#[test]
+fn verify_help_uses_singular_target_and_keeps_history_separate() {
+    let output = run(&["verify", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--target <TARGET>"));
+    assert!(!help.contains("--targets"));
+    assert!(!help.contains("--attempt"));
+    assert!(!help.contains("--deployment"));
+}
+
+#[test]
+fn legacy_commands_and_flags_remain_hidden_compatibility_aliases() {
+    for legacy_help in [
+        &["deployment", "add", "--help"][..],
+        &["identity", "create", "--help"][..],
+        &["enroll", "--help"][..],
+        &["artifact", "verify-statement", "--help"][..],
+        &["artifact", "verify-evidence", "--help"][..],
+    ] {
+        assert!(run(legacy_help).status.success());
+    }
+
+    let dir = TempDir::new("legacy-seed");
+    let env_file = dir.join(".env");
+    let output = run(&["identity", "create", "--env-file", path_arg(&env_file)]);
+    assert!(output.status.success());
+    assert!(env_file.exists());
+
+    let config = dir.join("canary.json");
+    let pcrs = dir.join("trusted_hashes.json");
+    write_trusted_pcrs(&pcrs);
+    let output = run(&[
+        "deployment",
+        "add",
+        "--config",
+        path_arg(&config),
+        "--canary-id",
+        "caution-canary-demo",
+        "--id",
+        "payments-prod",
+        "--url",
+        "https://payments.example.com/attestation",
+        "--pcrs",
+        path_arg(&pcrs),
+    ]);
+    assert!(output.status.success());
+    assert!(config.exists());
+
+    let keys = dir.join("keys.json");
+    let canonical = run(&[
+        "save-canary-keys",
+        "--canary-url",
+        "not-a-url",
+        "--skip-canary-attestation",
+        "--allow-http",
+        "--output",
+        path_arg(&keys),
+    ]);
+    let legacy = run(&[
+        "enroll",
+        "--url",
+        "not-a-url",
+        "--insecure",
+        "--keys",
+        path_arg(&keys),
+    ]);
+    assert_eq!(legacy.status, canonical.status);
+    assert_eq!(legacy.stderr, canonical.stderr);
+
+    let missing_evidence = dir.join("missing-evidence.json");
+    let canonical = run(&[
+        "verify-evidence",
+        "--evidence",
+        path_arg(&missing_evidence),
+        "--expected-pcrs",
+        path_arg(&pcrs),
+    ]);
+    let legacy = run(&[
+        "artifact",
+        "verify-evidence",
+        "--evidence",
+        path_arg(&missing_evidence),
+        "--pcrs",
+        path_arg(&pcrs),
+    ]);
+    assert_eq!(legacy.status, canonical.status);
+    assert_eq!(legacy.stderr, canonical.stderr);
+
+    let missing_watch = dir.join("missing-watch.json");
+    let canonical = run(&[
+        "watch",
+        "--config",
+        path_arg(&missing_watch),
+        "--skip-canary-attestation",
+        "--allow-http-canary",
+        "--allow-http-webhooks",
+    ]);
+    let legacy = run(&["watch", "--config", path_arg(&missing_watch), "--insecure"]);
+    assert_eq!(legacy.status, canonical.status);
+    assert_eq!(legacy.stderr, canonical.stderr);
+}
+
+#[test]
+fn verify_attempt_requires_one_target_and_positive_attempt_before_network_access() {
+    let no_target = run(&[
+        "verify-attempt",
+        "--canary-url",
+        "https://canary.example.com",
+        "--skip-canary-attestation",
+        "--attempt",
+        "1",
+    ]);
+    assert!(!no_target.status.success());
+    assert!(String::from_utf8_lossy(&no_target.stderr).contains("--target"));
+
+    let two_targets = run(&[
+        "verify-attempt",
+        "--canary-url",
+        "https://canary.example.com",
+        "--skip-canary-attestation",
+        "--target",
+        "one",
+        "--target",
+        "two",
+        "--attempt",
+        "1",
+    ]);
+    assert!(!two_targets.status.success());
+
+    let non_positive = run(&[
+        "verify-attempt",
+        "--canary-url",
+        "https://canary.example.com",
+        "--skip-canary-attestation",
+        "--target",
+        "one",
+        "--attempt",
+        "0",
+    ]);
+    assert!(!non_positive.status.success());
+    assert!(String::from_utf8_lossy(&non_positive.stderr).contains("positive history ID"));
+}
+
+#[test]
+fn legacy_verify_attempt_flags_remain_compatible() {
+    let no_target = run(&[
         "verify",
         "--url",
         "https://canary.example.com",
@@ -498,10 +798,10 @@ fn verify_attempt_requires_exactly_one_deployment_before_network_access() {
         "--attempt",
         "1",
     ]);
-    assert!(!no_deployment.status.success());
-    assert!(String::from_utf8_lossy(&no_deployment.stderr).contains("exactly one --deployment"));
+    assert!(!no_target.status.success());
+    assert!(String::from_utf8_lossy(&no_target.stderr).contains("exactly one --target"));
 
-    let two_deployments = run(&[
+    let two_targets = run(&[
         "verify",
         "--url",
         "https://canary.example.com",
@@ -513,6 +813,6 @@ fn verify_attempt_requires_exactly_one_deployment_before_network_access() {
         "--attempt",
         "1",
     ]);
-    assert!(!two_deployments.status.success());
-    assert!(String::from_utf8_lossy(&two_deployments.stderr).contains("exactly one --deployment"));
+    assert!(!two_targets.status.success());
+    assert!(String::from_utf8_lossy(&two_targets.stderr).contains("exactly one --target"));
 }

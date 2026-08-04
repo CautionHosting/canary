@@ -649,7 +649,8 @@ mod tests {
         evidence::{AuthenticatedPcrClaims, EvidenceBundle, PcrMatches, PcrValues},
         keys::{KeyEntry, KeysDocument},
         node::ConfigDocument,
-        statement::{Payload, Signature, Signer, Statement, Status},
+        statement::{Payload, Signature, Signer, Statement, Status, CADDY_CLAIM_TYPE},
+        tls_binding::TlsBindingResult,
     };
     use chrono::{Duration, TimeZone, Utc};
     use http_body_util::BodyExt as _;
@@ -685,6 +686,7 @@ mod tests {
                 id: "target-a".to_owned(),
                 name: "Target A".to_owned(),
                 attestation_url: "https://example.test/attestation".to_owned(),
+                e2e_mode: None,
                 expected_pcrs: ExpectedPcrs {
                     pcr0: "a".repeat(96),
                     pcr1: "b".repeat(96),
@@ -718,6 +720,7 @@ mod tests {
                 reason: "ALL_CHECKS_PASSED".to_owned(),
                 config_digest: digest('a'),
                 evidence_digest: Some(digest('b')),
+                tls: None,
                 observed_at: Some("2023-11-14T22:13:20Z".to_owned()),
                 issued_at: "2023-11-14T22:13:20Z".to_owned(),
                 expires_at: "2023-11-14T22:16:20Z".to_owned(),
@@ -920,14 +923,15 @@ mod tests {
             "text/javascript; charset=utf-8"
         );
         let script = String::from_utf8(body).unwrap();
-        assert!(script.contains("canaryctl enroll"));
-        assert!(script.contains("then writes the authenticated keys"));
-        assert!(script.contains("--keys canary-keys.json"));
-        assert!(script.contains("canaryctl verify"));
-        assert!(script.contains("--deployment"));
+        assert!(script.contains("canaryctl save-canary-keys"));
+        assert!(script.contains("then saves the authenticated keys"));
+        assert!(script.contains("--output canary-keys.json"));
+        assert!(script.contains("canaryctl ${command}"));
+        assert!(script.contains("--target"));
         assert!(script.contains("--attempt"));
-        assert!(script.contains("--pcrs"));
-        assert!(script.contains("--insecure"));
+        assert!(script.contains("--expected-pcrs"));
+        assert!(script.contains("--skip-canary-attestation"));
+        assert!(script.contains("--allow-http"));
         assert!(script.contains("isNitroEnclave"));
         assert!(script.contains("browserVerifyNitro"));
         assert!(script.contains("fetch(\"/attestation\""));
@@ -941,7 +945,7 @@ mod tests {
         assert!(script.contains("Observed PCRs came from evidence"));
         assert!(script.contains("historyClaimsAttempt"));
         assert!(script.contains("history/${attemptId}/evidence/claims"));
-        assert!(!script.contains("window.location.protocol"));
+        assert!(script.contains("window.location.protocol === \"http:\""));
         assert!(script
             .contains("deploymentPath(`history?offset=${offset}&limit=${HISTORY_PAGE_SIZE + 1}`)"));
         assert!(script.contains("const HISTORY_PAGE_SIZE = 25"));
@@ -951,6 +955,29 @@ mod tests {
         let (status, _, body) = response(router(state), "/health").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, br#"{"status":"ok"}"#);
+    }
+
+    #[tokio::test]
+    async fn caddy_target_is_tagged_and_exposes_its_signed_certificate_comparison() {
+        let mut caddy = target(Some(evidence()));
+        caddy.target_origin = "https://caddy-poc.kobl.one".to_owned();
+        caddy.statement.payload.target_origin = caddy.target_origin.clone();
+        caddy.statement.payload.claim_type = CADDY_CLAIM_TYPE.to_owned();
+        caddy.statement.payload.tls = Some(TlsBindingResult {
+            attested_mode: "caddy".to_owned(),
+            attested_domain: "caddy-poc.kobl.one".to_owned(),
+            attested_certfp: "a".repeat(64),
+            observed_certfp: "b".repeat(64),
+        });
+        let page = crate::html::render_status_page(&snapshot(caddy));
+
+        assert!(page.contains("data-target-profile=\"caddy\""));
+        assert!(page.contains("E2E · CADDY"));
+        assert!(page.contains("data-tls-attested-certfp=\"aaaaaaaa"));
+        assert!(page.contains("data-tls-observed-certfp=\"bbbbbbbb"));
+        assert!(page.contains("Observed TLS cert SHA-256"));
+        assert!(crate::html::UI_SCRIPT.contains("openssl s_client"));
+        assert!(crate::html::UI_SCRIPT.contains("-servername ${hostname}"));
     }
 
     #[tokio::test]
@@ -1215,6 +1242,11 @@ mod tests {
         assert!(page.contains("data-tab=\"history\""));
         assert!(page.contains("Current result"));
         assert!(page.contains("Recorded attempts"));
+        assert!(page.contains("<h2 id=\"targets-heading\">Targets</h2>"));
+        assert!(page.contains("Verify this target locally"));
+        assert!(page.contains("Target URL"));
+        assert!(!page.contains("<h2 id=\"targets-heading\">Deployments</h2>"));
+        assert!(!page.contains("Verify this deployment locally"));
         assert!(page.contains("id=\"deployment-command\""));
         assert!(
             page.find("id=\"deployment-command\"").unwrap()
@@ -1234,9 +1266,9 @@ mod tests {
         assert!(!page.contains("data-tab=\"statement\""));
         assert!(!page.contains("data-tab=\"evidence\""));
         assert!(page.contains("canaryctl verify"));
-        assert!(page.contains("canaryctl enroll"));
+        assert!(page.contains("canaryctl save-canary-keys"));
         assert!(page.contains("saves the observed TOFU keys"));
-        assert!(page.contains("--keys canary-keys.json"));
+        assert!(page.contains("--output canary-keys.json"));
         assert!(page.contains("data-runtime-environment=\"non_enclave\""));
         assert!(page.contains("data-identity-mode=\"stable\""));
         assert!(page.contains("id=\"self-check-heading\""));
@@ -1292,9 +1324,9 @@ mod tests {
         assert!(page.contains("Decoded claims JSON"));
         assert!(page.contains("ATTESTED:"));
         assert!(page.contains("writes <code>canary-keys.json</code> only after"));
-        assert!(page.contains("then writes the authenticated keys"));
+        assert!(page.contains("then saves the authenticated keys"));
         assert!(page.contains("caution verify --save-pcrs"));
-        assert!(page.contains("--pcrs .caution/trusted_hashes.json"));
+        assert!(page.contains("--expected-pcrs .caution/trusted_hashes.json"));
         assert!(
             page.find("id=\"targets-heading\"").unwrap()
                 < page.find("id=\"verify-heading\"").unwrap()
@@ -1320,7 +1352,7 @@ mod tests {
         let page = String::from_utf8(body).unwrap();
         assert!(page.contains("data-identity-mode=\"ephemeral\""));
         assert!(page.contains("Ephemeral identity"));
-        assert!(page.contains("ephemeral; enroll new keys after restart"));
+        assert!(page.contains("ephemeral; save its new keys after restart"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
   "version": 0,
-  "node_id": "caution-canary-demo",
+  "node_id": "canary-demo",
   "probe_interval_seconds": 60,
   "history_limit": 1000,
   "targets": [
@@ -10,8 +10,28 @@
       "attestation_url": "https://caddy-poc.kobl.one/attestation",
       "e2e_mode": "caddy",
       "expected_pcrs": {
-        "0": "e0c2eccfc293b0bc22e1e83e46d6784bb26ebad44bc4909591827f72d588e12f1f84b112c2a3c72b5f4635f194a7955a",
-        "1": "e0c2eccfc293b0bc22e1e83e46d6784bb26ebad44bc4909591827f72d588e12f1f84b112c2a3c72b5f4635f194a7955a",
+        "0": "5362895473c431a5be93b6bdcaa189aa1497a841bec86a72038f8867654b11a5cfea673739da3548a305f56e0977d62d",
+        "1": "5362895473c431a5be93b6bdcaa189aa1497a841bec86a72038f8867654b11a5cfea673739da3548a305f56e0977d62d",
+        "2": "21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a"
+      }
+    },
+    {
+      "id": "xwing-poc",
+      "name": "Xwing POC",
+      "attestation_url": "https://xwing.kobl.one/attestation",
+      "expected_pcrs": {
+        "0": "e1e2ec28d08622cffd8239213abf62889cf6f6730aa591cbc0de4862d4126ee79e0292ffb87fb28e5d0ea243f2f22d53",
+        "1": "e1e2ec28d08622cffd8239213abf62889cf6f6730aa591cbc0de4862d4126ee79e0292ffb87fb28e5d0ea243f2f22d53",
+        "2": "21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a"
+      }
+    },
+    {
+      "id": "x25519-poc",
+      "name": "x25519 POC",
+      "attestation_url": "https://x25519.kobl.one/attestation",
+      "expected_pcrs": {
+        "0": "3298f36cfff52ea356671da36c256a631f70def37d341e4f3eb42c2e072d29ecdd7eccfc6244a116853625ce0b82c433",
+        "1": "3298f36cfff52ea356671da36c256a631f70def37d341e4f3eb42c2e072d29ecdd7eccfc6244a116853625ce0b82c433",
         "2": "21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a"
       }
     }

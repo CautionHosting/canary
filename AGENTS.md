@@ -43,7 +43,7 @@ Three crates in a Cargo workspace (`resolver = "2"`, edition 2021, MSRV 1.88, li
 |---|---|---|
 | `canary-core` | Pure trust core: config schema/validation, JCS canonicalization, HKDF key derivation, hybrid signing/verification, Bootproof evidence verification. No I/O, no NSM, no network. | library |
 | `canaryd` | The enclave daemon: scheduler, probe runner, SQLite history, Axum HTTP API, server-rendered status page. | `canaryd` |
-| `canaryctl` | Operator CLI: `deployment add`, `identity create`, `enroll`, `verify`, `artifact verify-statement/verify-evidence`. | `canaryctl` |
+| `canaryctl` | Operator CLI: `add-target`, `create-signing-seed`, `save-canary-keys`, `verify`, `verify-attempt`, `watch`, `verify-statement`, `verify-evidence`. | `canaryctl` |
 
 `canary-core` is the dependency root — both `canaryd` and `canaryctl` depend on it, never on each other.
 
@@ -78,11 +78,11 @@ canary.json (measured config)
    └── metadata::write_metadata_atomic → internal /metadata.json for Bootproofd attestation
 
 canaryctl (outside enclave)
-   ├── deployment add  → writes canary.json (trusted PCRs or TOFU)
-   ├── identity create → writes .env (CANARY_MASTER_SEED, 0o600)
-   ├── enroll          → verifies Canary attestation, saves canary-keys.json
+   ├── add-target          → writes canary.json (trusted PCRs or TOFU)
+   ├── create-signing-seed → writes .env (CANARY_MASTER_SEED, 0o600)
+   ├── save-canary-keys    → verifies Canary attestation, saves canary-keys.json
    ├── verify          → full chain: Canary attestation → keys → signatures → evidence → PCRs
-   └── artifact verify-* → partial offline checks on downloaded JSON
+   └── verify-statement/evidence → partial offline checks on downloaded JSON
 ```
 
 ### Key design principles
@@ -104,7 +104,7 @@ The measured configuration file embedded in the enclave image. Schema is in `can
 - PCR0/1/2 must be 96-char lowercase hex (SHA-384), nonzero (rejects debug/zero PCRs)
 - `probe_interval_seconds`: 6–86400 (default 60); `history_limit`: 1–10000 (default 1000)
 - 1–100 targets required
-- Written by `canaryctl deployment add` as pretty JSON with trailing newline; `validate-deployment.sh` verifies the committed file is byte-identical to canonical `deployment add` output
+- Written by `canaryctl add-target` as pretty JSON with trailing newline; `validate-deployment.sh` verifies the committed file is byte-identical to canonical `add-target` output
 
 ## Crypto and signing
 
@@ -141,8 +141,8 @@ A strict offline pre-release gate. It checks:
 2. `caution.hcl` matches the approved V0 release shape (normalizes the two operator-supplied values — `app_sources` URL and `domain` — then diffs against `caution.hcl.template`). Rejects debug mode, STEVE/e2e, custom resources, extra units/enclaves, binary builds, extra secrets.
 3. `app_sources` must be a public HTTPS URL (no placeholders, no `example.*`, no `localhost`, no IPs, no credentials/fragments/queries)
 4. `canary.json` has the exact V0 schema, ≥2 targets, ≥2 unique HTTPS origins
-5. Each target's PCRs match a per-target `.caution/trusted_hashes/{target_id}.json` release-validation file; `caution verify --save-pcrs` produces the singular `.caution/trusted_hashes.json` enrollment input
-6. `canary.json` is canonical `canaryctl deployment add` output (re-runs `deployment add --replace` and compares byte-for-byte)
+5. Each target's PCRs match a per-target `.caution/trusted_hashes/{target_id}.json` release-validation file; `caution verify --save-pcrs` produces the singular `.caution/trusted_hashes.json` trusted-PCR input
+6. `canary.json` is canonical `canaryctl add-target` output (re-runs `add-target --replace` and compares byte-for-byte)
 
 ## Caution deployment
 
@@ -152,7 +152,7 @@ This service is itself deployed on Caution. See `caution.hcl` (production) and `
 - Stable identity: `env::vault("CANARY_MASTER_SEED")` + Locksmith artifacts baked into the image
 - Ephemeral identity: `args = ["--ephemeral-identity"]` — no Locksmith needed, but keys change on restart
 - Deploy via `git push caution main` after `caution init`
-- `caution verify --save-pcrs` produces the trusted hashes that feed `canaryctl deployment add --pcrs`
+- `caution verify --save-pcrs` produces the trusted hashes that feed `canaryctl add-target --expected-pcrs`
 
 ## Testing patterns
 

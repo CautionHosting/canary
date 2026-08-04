@@ -29,13 +29,13 @@ impl VerificationOutcome {
                 "Canary: TOFU — identity/config not independently authenticated".to_owned()
             }
             ("ATTESTED", "ephemeral") => {
-                "Canary: ATTESTED (ephemeral identity; re-enroll after restart)".to_owned()
+                "Canary: ATTESTED (ephemeral identity; save new keys after restart)".to_owned()
             }
             ("ATTESTED", "stable") => "Canary: ATTESTED (stable identity)".to_owned(),
             _ => format!("Canary: {} ({})", self.trust, self.identity),
         };
         let mut output = format!(
-            "{}  {}/{} deployment{}\n{}",
+            "{}  {}/{} target{}\n{}",
             if self.ok { "VERIFIED" } else { "NOT VERIFIED" },
             verified,
             self.deployments.len(),

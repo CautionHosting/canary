@@ -37,13 +37,20 @@ type HmacSha256 = Hmac<Sha256>;
 /// Local-only controls supplied by the CLI command.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct WatchOptions {
-    pub(crate) insecure_canary: bool,
+    pub(crate) skip_canary_attestation: bool,
+    pub(crate) allow_http_canary: bool,
 }
 
 /// Run the watcher until interrupted.
 pub(crate) fn run(config: &WatchConfig, options: WatchOptions) -> Result<()> {
-    let canary_url = config.canary_url(options.insecure_canary)?.as_str();
-    validate_trust_mode(config.canary.pcrs.as_deref(), options.insecure_canary)?;
+    if options.allow_http_canary && !options.skip_canary_attestation {
+        bail!("--allow-http-canary requires --skip-canary-attestation");
+    }
+    let canary_url = config.canary_url(options.allow_http_canary)?.as_str();
+    validate_trust_mode(
+        config.canary.pcrs.as_deref(),
+        options.skip_canary_attestation,
+    )?;
     let target_ids = config
         .targets
         .iter()
@@ -52,7 +59,8 @@ pub(crate) fn run(config: &WatchConfig, options: WatchOptions) -> Result<()> {
     let initial = live_verify::run(
         canary_url,
         config.canary.pcrs.as_deref(),
-        options.insecure_canary,
+        options.skip_canary_attestation,
+        options.allow_http_canary,
         &config.canary.keys,
         &target_ids,
     )
@@ -82,7 +90,8 @@ pub(crate) fn run(config: &WatchConfig, options: WatchOptions) -> Result<()> {
         let events = match live_verify::run(
             canary_url,
             config.canary.pcrs.as_deref(),
-            options.insecure_canary,
+            options.skip_canary_attestation,
+            options.allow_http_canary,
             &config.canary.keys,
             &target_ids,
         ) {
@@ -96,14 +105,17 @@ pub(crate) fn run(config: &WatchConfig, options: WatchOptions) -> Result<()> {
     }
 }
 
-fn validate_trust_mode(pcrs: Option<&std::path::Path>, insecure_canary: bool) -> Result<()> {
-    match (pcrs, insecure_canary) {
+fn validate_trust_mode(
+    pcrs: Option<&std::path::Path>,
+    skip_canary_attestation: bool,
+) -> Result<()> {
+    match (pcrs, skip_canary_attestation) {
         (Some(_), false) | (None, true) => {}
         (Some(_), true) => {
-            bail!("canary.pcrs must be omitted when an HTTP Canary uses --insecure")
+            bail!("canary.pcrs must be omitted with --skip-canary-attestation")
         }
         (None, false) => {
-            bail!("canary.pcrs is required unless --insecure is used")
+            bail!("canary.pcrs is required unless --skip-canary-attestation is used")
         }
     }
     Ok(())

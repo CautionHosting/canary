@@ -358,20 +358,22 @@ IwLz3/Y=
     return `/targets/${encodeURIComponent(currentDeployment.id)}/${kind}`;
   }
 
-  function enrollmentCommand() {
+  function saveKeysCommand() {
     if (!isNitroEnclave) {
-      return `# Saves the observed TOFU keys to canary-keys.json; Canary attestation is skipped.\ncanaryctl enroll --url ${window.location.origin} --insecure --keys canary-keys.json`;
+      const allowHttp = window.location.protocol === "http:" ? " --allow-http" : "";
+      return `# Saves observed TOFU keys; Canary attestation is skipped.\ncanaryctl save-canary-keys --canary-url ${window.location.origin} --skip-canary-attestation${allowHttp} --output canary-keys.json`;
     }
-    return `caution verify --save-pcrs\n\n# Verifies fresh Canary attestation + expected PCR0/1/2, then writes the authenticated keys.\ncanaryctl enroll --url ${window.location.origin} --pcrs .caution/trusted_hashes.json --keys canary-keys.json`;
+    return `caution verify --save-pcrs\n\n# Verifies fresh Canary attestation + expected PCR0/1/2, then saves the authenticated keys.\ncanaryctl save-canary-keys --canary-url ${window.location.origin} --expected-pcrs .caution/trusted_hashes.json --output canary-keys.json`;
   }
 
-  function verificationCommand(deploymentId, attemptId) {
-    const deployment = deploymentId ? ` \\\n  --deployment ${deploymentId}` : "";
+  function verificationCommand(targetId, attemptId) {
+    const command = attemptId ? "verify-attempt" : "verify";
+    const target = targetId ? ` \\\n  --target ${targetId}` : "";
     const attempt = attemptId ? ` \\\n  --attempt ${attemptId}` : "";
     const trust = isNitroEnclave
-      ? "--pcrs .caution/trusted_hashes.json"
-      : "--insecure";
-    return `canaryctl verify \\\n  --url ${window.location.origin} \\\n  ${trust}${deployment}${attempt}`;
+      ? "--expected-pcrs .caution/trusted_hashes.json"
+      : `--skip-canary-attestation${window.location.protocol === "http:" ? " --allow-http" : ""}`;
+    return `canaryctl ${command} \\\n  --canary-url ${window.location.origin} \\\n  ${trust}${target}${attempt}`;
   }
 
   function certificateCommand(origin) {
@@ -820,9 +822,9 @@ IwLz3/Y=
     });
   }
 
-  const enrollment = document.querySelector("#enroll-command");
-  if (enrollment) enrollment.textContent = enrollmentCommand();
-  setCommand(document.querySelector("#all-deployments-command"), null);
+  const saveKeys = document.querySelector("#save-keys-command");
+  if (saveKeys) saveKeys.textContent = saveKeysCommand();
+  setCommand(document.querySelector("#all-targets-command"), null);
 
   let hashDeployment = "";
   try {

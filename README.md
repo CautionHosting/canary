@@ -19,6 +19,11 @@ cargo build --release --locked -p canaryctl
 export PATH="$PWD/target/release:$PATH"
 ```
 
+The public command surface is flat: `add-target`, `create-signing-seed`,
+`save-canary-keys`, `verify`, `verify-attempt`, `watch`, `verify-statement`, and
+`verify-evidence`. Legacy command and flag spellings remain hidden compatibility
+aliases for one release; new scripts must use the names documented here.
+
 You need a public HTTPS Bootproof `/attestation` endpoint for each deployment. Local
 use additionally needs Docker with BuildKit and linux/amd64 support.
 
@@ -33,13 +38,13 @@ caution verify \
   --attestation-url https://payments.example.com/attestation \
   --save-pcrs
 
-canaryctl deployment add \
+canaryctl add-target \
   --config canary.json \
   --canary-id company-canary \
   --id payments-prod \
   --name "Payments production" \
-  --url https://payments.example.com/attestation \
-  --pcrs .caution/trusted_hashes.json
+  --attestation-url https://payments.example.com/attestation \
+  --expected-pcrs .caution/trusted_hashes.json
 ```
 
 `--canary-id` is required only when creating `canary.json`. Add each further
@@ -48,13 +53,13 @@ deployment with a unique ID; use `--replace` to change an existing one.
 For an enclave-terminated Caddy deployment, add the opt-in binding profile:
 
 ```sh
-canaryctl deployment add \
+canaryctl add-target \
   --config canary.json \
   --canary-id company-canary \
   --id payments-prod \
-  --url https://payments.example.com/attestation \
+  --attestation-url https://payments.example.com/attestation \
   --e2e-mode caddy \
-  --pcrs .caution/trusted_hashes.json
+  --expected-pcrs .caution/trusted_hashes.json
 ```
 
 This profile requires independently supplied PCR0/1/2; it cannot be combined with
@@ -62,15 +67,15 @@ TOFU. Missing, malformed, or unequal authenticated Caddy metadata produces an
 immediate signed `FAILED / TLS_BINDING_MISMATCH`. The next successful scheduled probe
 restores `VERIFIED`; there is no renewal grace period.
 
-For a local evaluation, use explicit deployment TOFU instead:
+For a local evaluation, use explicit target TOFU instead:
 
 ```sh
-canaryctl deployment add \
+canaryctl add-target \
   --config canary.json \
   --canary-id company-canary \
   --id payments-prod \
   --name "Payments production" \
-  --url https://payments.example.com/attestation \
+  --attestation-url https://payments.example.com/attestation \
   --tofu
 ```
 
@@ -83,7 +88,7 @@ the values carefully; scripted use requires explicit `--accept-tofu`.
 For local development, create a signing seed and run the local image:
 
 ```sh
-canaryctl identity create --env-file .env
+canaryctl create-signing-seed --output .env
 
 docker buildx build \
   --load \
@@ -112,7 +117,7 @@ source URL and HTTPS domain, then choose one identity mode:
   encrypted seed:
 
   ```sh
-  canaryctl identity create --env-file .env
+  canaryctl create-signing-seed --output .env
   caution secret keygen canary.asc \
     --name "Canary POC" --email canary@example.com --shoot-self-in-foot
   export KEYMAKER_URL=https://keymaker.example.com
@@ -144,7 +149,7 @@ caution secret send-shard --keyring canary.private.asc
 ```
 
 The stable signing keyset survives restarts. An ephemeral Canary creates a new keyset
-and must be enrolled again after every restart.
+and requires a newly saved key pin after every restart.
 
 ### 3. Inspect current status
 
@@ -176,25 +181,25 @@ origin being checked.
 
 ### 4. Verify independently
 
-For Caution, enroll Canary's attested public keys once:
+For Caution, verify Canary and save its authenticated public keys once:
 
 ```sh
-canaryctl enroll \
-  --url https://canary.example.com \
-  --pcrs .caution/trusted_hashes.json \
-  --keys canary-keys.json
+canaryctl save-canary-keys \
+  --canary-url https://canary.example.com \
+  --expected-pcrs .caution/trusted_hashes.json \
+  --output canary-keys.json
 
 canaryctl verify \
-  --url https://canary.example.com \
-  --pcrs .caution/trusted_hashes.json \
-  --keys canary-keys.json
+  --canary-url https://canary.example.com \
+  --expected-pcrs .caution/trusted_hashes.json \
+  --trusted-keys canary-keys.json
 ```
 
-`enroll` writes `canary-keys.json` only after the fresh Canary attestation, expected
-PCR0/1/2, and attested config/key binding verify successfully.
+`save-canary-keys` writes `canary-keys.json` only after the fresh Canary attestation,
+expected PCR0/1/2, and attested config/key binding verify successfully.
 
-Keep `canary-keys.json` as an integrity-critical public trust file. Enrollment never
-overwrites it. Select specific deployments with repeated `--deployment payments-prod`.
+Keep `canary-keys.json` as an integrity-critical public trust file. The command never
+overwrites it. Select specific targets with repeated `--target payments-prod`.
 Successful verification displays authenticated observed PCR0/1/2 in the normal
 output. `--verbose` displays full observed and expected values; `--json` provides the
 same values and match booleans under `pcrs`. Results without authenticated evidence
@@ -206,21 +211,24 @@ The local Docker flow has no Canary attestation. Pin its first observed keyset o
 with the explicit local TOFU mode:
 
 ```sh
-canaryctl enroll \
-  --url http://localhost:8080 \
-  --insecure \
-  --keys canary-keys.json
+canaryctl save-canary-keys \
+  --canary-url http://localhost:8080 \
+  --skip-canary-attestation \
+  --allow-http \
+  --output canary-keys.json
 
 canaryctl verify \
-  --url http://localhost:8080 \
-  --insecure \
-  --keys canary-keys.json
+  --canary-url http://localhost:8080 \
+  --skip-canary-attestation \
+  --allow-http \
+  --trusted-keys canary-keys.json
 ```
 
-`--insecure` skips Canary's own attestation. It still pins Canary's keys and checks
+`--skip-canary-attestation` selects explicit TOFU; `--allow-http` separately permits
+the local HTTP origin. Verification still requires the saved Canary keys and checks
 both signatures on every result. For a `VERIFIED` result it also checks the linked
-deployment Nitro evidence and PCR0/1/2. It does not authenticate the original Canary
-identity or configured deployment policy.
+target Nitro evidence and PCR0/1/2. It does not authenticate the original Canary
+identity or configured target policy.
 
 ## Optional webhook watcher
 
@@ -230,7 +238,11 @@ different notification routes:
 ```sh
 cp canary-watch.example.json canary-watch.json
 export PQ_WEBHOOK_SECRET="$(openssl rand -base64 32)"
-canaryctl watch --config canary-watch.json --insecure
+canaryctl watch \
+  --config canary-watch.json \
+  --skip-canary-attestation \
+  --allow-http-canary \
+  --allow-http-webhooks
 ```
 
 Each target can fan out to multiple webhooks. The watcher performs the same complete
@@ -246,9 +258,10 @@ change the Canary deployment.
 `canary-watch.json` is deliberately separate from measured `canary.json`, so changing
 alert routing does not rebuild the Canary enclave. Relative PCR and key paths resolve
 from the watcher config's directory. Restart the watcher after editing its config.
-For local testing, pass `--insecure` to allow HTTP webhook URLs. If the Canary itself
-is local and uses HTTP, also omit `canary.pcrs`; the same flag then skips Canary's own
-attestation. `--insecure` must not be used in production.
+For local testing, `--allow-http-webhooks` permits HTTP receivers. If Canary itself is
+local, omit `canary.pcrs`, pass `--skip-canary-attestation`, and add
+`--allow-http-canary` when its origin is HTTP. None of these local-only flags belongs
+in production.
 
 Every POST contains `schema_version`, `event`, `event_id`, `timestamp`, `canary`, and
 `data`. Verify the receiver-facing headers against the exact request body:
@@ -264,14 +277,14 @@ and `watcher.heartbeat`.
 
 ## Advanced checks
 
-Replay one retained attempt for one deployment:
+Replay one retained attempt for one target:
 
 ```sh
-canaryctl verify \
-  --url https://canary.example.com \
-  --pcrs .caution/trusted_hashes.json \
-  --keys canary-keys.json \
-  --deployment payments-prod \
+canaryctl verify-attempt \
+  --canary-url https://canary.example.com \
+  --expected-pcrs .caution/trusted_hashes.json \
+  --trusted-keys canary-keys.json \
+  --target payments-prod \
   --attempt 42
 ```
 
@@ -281,18 +294,18 @@ Download and inspect a protocol artifact only when needed for debugging or evalu
 curl -fsS https://canary.example.com/targets/payments-prod/statement -o statement.json
 curl -fsS https://canary.example.com/targets/payments-prod/evidence -o evidence.json
 
-canaryctl artifact verify-statement \
+canaryctl verify-statement \
   --statement statement.json \
-  --keys canary-keys.json
+  --trusted-keys canary-keys.json
 
-canaryctl artifact verify-evidence \
+canaryctl verify-evidence \
   --evidence evidence.json \
-  --pcrs .caution/trusted_hashes.json
+  --expected-pcrs .caution/trusted_hashes.json
 ```
 
 These are partial checks. Use `canaryctl verify` for the complete current or
 historical verification path. `--verbose` shows detailed chain diagnostics; `--json`
-emits one machine-readable result. `artifact verify-evidence` is intentionally
+emits one machine-readable result. `verify-evidence` is intentionally
 attestation/PCR-only: an offline evidence bundle has no TLS connection to compare.
 
 The ignored live Caddy acceptance test uses the production probe path and requires an

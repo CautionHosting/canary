@@ -101,16 +101,17 @@ impl DeploymentResult {
 pub fn run(
     base_url: &str,
     pcrs_file: Option<&Path>,
-    insecure: bool,
+    skip_canary_attestation: bool,
+    allow_http: bool,
     keys_path: &Path,
     requested_targets: &[String],
 ) -> Result<VerificationOutcome> {
     let started_at = Utc::now();
-    let node = match (pcrs_file, insecure) {
+    let node = match (pcrs_file, skip_canary_attestation) {
         (Some(path), false) => inspect::inspect(base_url, path)?,
-        (None, true) => inspect::inspect_unattested(base_url)?,
+        (None, true) => inspect::inspect_unattested(base_url, allow_http)?,
         (Some(_), true) | (None, false) => {
-            bail!("pass exactly one of --pcrs or --insecure")
+            bail!("pass exactly one of --expected-pcrs or --skip-canary-attestation")
         }
     };
     node.verify_pinned_keys(keys_path)?;
@@ -189,7 +190,8 @@ struct HistoricalObservation {
 pub fn run_history(
     base_url: &str,
     pcrs_file: Option<&Path>,
-    insecure: bool,
+    skip_canary_attestation: bool,
+    allow_http: bool,
     keys_path: &Path,
     target_id: &str,
     attempt_id: i64,
@@ -197,11 +199,11 @@ pub fn run_history(
     if attempt_id < 1 {
         bail!("--attempt must be a positive history ID");
     }
-    let node = match (pcrs_file, insecure) {
+    let node = match (pcrs_file, skip_canary_attestation) {
         (Some(path), false) => inspect::inspect(base_url, path)?,
-        (None, true) => inspect::inspect_unattested(base_url)?,
+        (None, true) => inspect::inspect_unattested(base_url, allow_http)?,
         (Some(_), true) | (None, false) => {
-            bail!("pass exactly one of --pcrs or --insecure")
+            bail!("pass exactly one of --expected-pcrs or --skip-canary-attestation")
         }
     };
     node.verify_pinned_keys(keys_path)?;
@@ -211,7 +213,7 @@ pub fn run_history(
         .targets
         .iter()
         .find(|target| target.id == target_id)
-        .with_context(|| format!("verified Canary config has no deployment {target_id:?}"))?;
+        .with_context(|| format!("verified Canary config has no target {target_id:?}"))?;
     let attempt_segment = attempt_id.to_string();
     let historical: HistoricalAttempt = node
         .get_json(&["targets", target_id, "history", attempt_segment.as_str()])
@@ -221,7 +223,7 @@ pub fn run_history(
         || historical.observation.target_id != target_id
         || historical.statement.payload.target_id != target_id
     {
-        bail!("historical response does not match the requested deployment and attempt");
+        bail!("historical response does not match the requested target and attempt");
     }
     if historical.observation.config_digest != historical.statement.payload.config_digest {
         bail!("historical summary config_digest does not match the signed statement");
@@ -283,14 +285,14 @@ fn select_targets<'a>(config: &'a ConfigDocument, requested: &[String]) -> Resul
     let mut selected = Vec::with_capacity(requested.len());
     for id in requested {
         if !seen.insert(id.as_str()) {
-            bail!("--deployment {id:?} was supplied more than once");
+            bail!("--target {id:?} was supplied more than once");
         }
         let target = config
             .config
             .targets
             .iter()
             .find(|target| target.id == *id)
-            .with_context(|| format!("verified Canary config has no deployment {id:?}"))?;
+            .with_context(|| format!("verified Canary config has no target {id:?}"))?;
         selected.push(target);
     }
     Ok(selected)
@@ -451,7 +453,7 @@ fn verify_target_artifacts(
                 &target.expected_pcrs.pcr1,
                 &target.expected_pcrs.pcr2,
             )
-            .context("decoding deployment PCR0/1/2 from verified Canary config")?;
+            .context("decoding target PCR0/1/2 from verified Canary config")?;
             let seconds = decoded.observed_at.timestamp();
             if seconds < 0 {
                 bail!("evidence observed_at is before the UNIX epoch");
@@ -571,7 +573,7 @@ fn node_report_text(node: &InspectedNode, pcrs_file: Option<&Path>, keys_path: &
                     writeln!(output, "  Current-process key pin PASS").unwrap();
                     writeln!(
                         output,
-                        "  Restart behavior        NEW KEYS — RE-ENROLL REQUIRED"
+                        "  Restart behavior        NEW KEYS — SAVE NEW KEY PIN REQUIRED"
                     )
                     .unwrap();
                 }
@@ -579,9 +581,22 @@ fn node_report_text(node: &InspectedNode, pcrs_file: Option<&Path>, keys_path: &
         }
         NodeTrust::UnattestedDev => {
             writeln!(output, "  Trust mode              TOFU").unwrap();
-            writeln!(output, "  Canary attestation      SKIPPED — --insecure").unwrap();
+            writeln!(
+                output,
+                "  Canary attestation      SKIPPED — --skip-canary-attestation"
+            )
+            .unwrap();
             writeln!(output, "  Canary workload PCRs    NOT VERIFIED").unwrap();
-            writeln!(output, "  Transport policy        HTTP ALLOWED").unwrap();
+            writeln!(
+                output,
+                "  Transport               {}",
+                if node.uses_http() {
+                    "HTTP — --allow-http"
+                } else {
+                    "HTTPS"
+                }
+            )
+            .unwrap();
             writeln!(
                 output,
                 "  Config authenticity     NOT VERIFIED — SELF-CONSISTENT ONLY"
@@ -1056,7 +1071,7 @@ mod tests {
         .unwrap();
         let attested = outcome_for(verified_report, "ATTESTED", "stable");
         let text = attested.concise_text();
-        assert!(text.contains("VERIFIED  1/1 deployment"));
+        assert!(text.contains("VERIFIED  1/1 target"));
         assert!(text.contains("Canary: ATTESTED (stable identity)"));
         assert!(text.contains("PCR0/1/2 + signatures"));
         assert!(text.contains("  PCR0 ef09...cc03  MATCH"));
@@ -1100,7 +1115,7 @@ mod tests {
         .unwrap();
         let tofu_negative = outcome_for(failed_report, "TOFU", "unknown");
         let text = tofu_negative.concise_text();
-        assert!(text.contains("NOT VERIFIED  0/1 deployment"));
+        assert!(text.contains("NOT VERIFIED  0/1 target"));
         assert!(text.contains("identity/config not independently authenticated"));
         assert!(text.contains("payments-prod  FAILED  PCR_MISMATCH"));
         assert!(text.contains(&format!(

@@ -306,7 +306,9 @@ fn start_watcher_with_poll(
             "watch",
             "--config",
             watcher_path.to_str().unwrap(),
-            "--insecure",
+            "--skip-canary-attestation",
+            "--allow-http-canary",
+            "--allow-http-webhooks",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
@@ -623,7 +625,9 @@ fn watch_rejects_a_target_missing_from_the_remote_canary_before_delivery() {
             "watch",
             "--config",
             watcher_path.to_str().unwrap(),
-            "--insecure",
+            "--skip-canary-attestation",
+            "--allow-http-canary",
+            "--allow-http-webhooks",
         ])
         .env(&secret_env, STANDARD.encode([0x77; 32]))
         .output()
@@ -633,7 +637,7 @@ fn watch_rejects_a_target_missing_from_the_remote_canary_before_delivery() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains("validating watcher config against remote Canary")
-            && stderr.contains("verified Canary config has no deployment \"missing-target\""),
+            && stderr.contains("verified Canary config has no target \"missing-target\""),
         "unexpected watcher error: {stderr}"
     );
     assert!(!stderr.contains("watching 1 target"));

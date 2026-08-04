@@ -1,4 +1,4 @@
-//! `canaryctl artifact verify-statement` (spec §9, §15 step 6).
+//! `canaryctl verify-statement` (spec §9, §15 step 6).
 //!
 //! Verification is deliberately offline in V0: the statement and public-key
 //! document come from local files, and the caller must obtain the keys through

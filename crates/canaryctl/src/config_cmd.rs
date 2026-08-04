@@ -1,5 +1,5 @@
 //! Shared config-file loading/upsert/writing logic for trusted-PCR and TOFU
-//! `deployment add` flows (spec §15 steps 2a/2b).
+//! `add-target` flows (spec §15 steps 2a/2b).
 
 use std::path::Path;
 
@@ -68,7 +68,7 @@ pub fn upsert_target(config: &mut Config, target: Target, replace: bool) -> Resu
     if let Some(existing) = config.targets.iter_mut().find(|t| t.id == target.id) {
         if !replace {
             bail!(
-                "deployment {:?} already exists in config; pass --replace to overwrite it",
+                "target {:?} already exists in config; pass --replace to overwrite it",
                 target.id
             );
         }

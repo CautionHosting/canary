@@ -82,26 +82,26 @@ struct RawWebhook {
 impl WatchConfig {
     /// Read, parse and validate a watcher configuration. Relative trust-input
     /// paths are interpreted relative to `path`, never the process CWD.
-    pub(crate) fn load(path: &Path, insecure: bool) -> Result<Self> {
+    pub(crate) fn load(path: &Path, allow_http_webhooks: bool) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading watcher config {}", path.display()))?;
         let raw: RawWatchConfig = serde_json::from_str(&text)
             .with_context(|| format!("parsing watcher config {}", path.display()))?;
         let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        Self::from_raw(raw, config_dir, insecure)
+        Self::from_raw(raw, config_dir, allow_http_webhooks)
     }
 
-    /// Return the Canary origin after enforcing the local-only insecure mode.
+    /// Return the Canary origin after enforcing the explicit HTTP permission.
     /// Callers must use this before making any Canary requests.
-    pub(crate) fn canary_url(&self, insecure_canary: bool) -> Result<&Url> {
-        if self.canary.url.scheme() == "https" || insecure_canary {
+    pub(crate) fn canary_url(&self, allow_http_canary: bool) -> Result<&Url> {
+        if self.canary.url.scheme() == "https" || allow_http_canary {
             Ok(&self.canary.url)
         } else {
-            bail!("canary.url must use HTTPS unless --insecure is set for local testing")
+            bail!("canary.url must use HTTPS unless --allow-http-canary is set")
         }
     }
 
-    fn from_raw(raw: RawWatchConfig, config_dir: &Path, insecure: bool) -> Result<Self> {
+    fn from_raw(raw: RawWatchConfig, config_dir: &Path, allow_http_webhooks: bool) -> Result<Self> {
         if raw.version != 1 {
             bail!("watcher config version must be 1");
         }
@@ -152,7 +152,7 @@ impl WatchConfig {
                     bail!("duplicate webhook id {:?}", webhook.id);
                 }
                 validate_env_name(&webhook.secret_env)?;
-                let url = parse_webhook_url(&webhook.url, insecure)?;
+                let url = parse_webhook_url(&webhook.url, allow_http_webhooks)?;
                 let hmac_key = load_hmac_key(&webhook.secret_env)?;
                 webhooks.push(Webhook {
                     id: webhook.id,

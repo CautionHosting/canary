@@ -923,14 +923,15 @@ mod tests {
             "text/javascript; charset=utf-8"
         );
         let script = String::from_utf8(body).unwrap();
-        assert!(script.contains("canaryctl enroll"));
-        assert!(script.contains("then writes the authenticated keys"));
-        assert!(script.contains("--keys canary-keys.json"));
-        assert!(script.contains("canaryctl verify"));
-        assert!(script.contains("--deployment"));
+        assert!(script.contains("canaryctl save-canary-keys"));
+        assert!(script.contains("then saves the authenticated keys"));
+        assert!(script.contains("--output canary-keys.json"));
+        assert!(script.contains("canaryctl ${command}"));
+        assert!(script.contains("--target"));
         assert!(script.contains("--attempt"));
-        assert!(script.contains("--pcrs"));
-        assert!(script.contains("--insecure"));
+        assert!(script.contains("--expected-pcrs"));
+        assert!(script.contains("--skip-canary-attestation"));
+        assert!(script.contains("--allow-http"));
         assert!(script.contains("isNitroEnclave"));
         assert!(script.contains("browserVerifyNitro"));
         assert!(script.contains("fetch(\"/attestation\""));
@@ -944,7 +945,7 @@ mod tests {
         assert!(script.contains("Observed PCRs came from evidence"));
         assert!(script.contains("historyClaimsAttempt"));
         assert!(script.contains("history/${attemptId}/evidence/claims"));
-        assert!(!script.contains("window.location.protocol"));
+        assert!(script.contains("window.location.protocol === \"http:\""));
         assert!(script
             .contains("deploymentPath(`history?offset=${offset}&limit=${HISTORY_PAGE_SIZE + 1}`)"));
         assert!(script.contains("const HISTORY_PAGE_SIZE = 25"));
@@ -1260,9 +1261,9 @@ mod tests {
         assert!(!page.contains("data-tab=\"statement\""));
         assert!(!page.contains("data-tab=\"evidence\""));
         assert!(page.contains("canaryctl verify"));
-        assert!(page.contains("canaryctl enroll"));
+        assert!(page.contains("canaryctl save-canary-keys"));
         assert!(page.contains("saves the observed TOFU keys"));
-        assert!(page.contains("--keys canary-keys.json"));
+        assert!(page.contains("--output canary-keys.json"));
         assert!(page.contains("data-runtime-environment=\"non_enclave\""));
         assert!(page.contains("data-identity-mode=\"stable\""));
         assert!(page.contains("id=\"self-check-heading\""));
@@ -1318,9 +1319,9 @@ mod tests {
         assert!(page.contains("Decoded claims JSON"));
         assert!(page.contains("ATTESTED:"));
         assert!(page.contains("writes <code>canary-keys.json</code> only after"));
-        assert!(page.contains("then writes the authenticated keys"));
+        assert!(page.contains("then saves the authenticated keys"));
         assert!(page.contains("caution verify --save-pcrs"));
-        assert!(page.contains("--pcrs .caution/trusted_hashes.json"));
+        assert!(page.contains("--expected-pcrs .caution/trusted_hashes.json"));
         assert!(
             page.find("id=\"targets-heading\"").unwrap()
                 < page.find("id=\"verify-heading\"").unwrap()
@@ -1346,7 +1347,7 @@ mod tests {
         let page = String::from_utf8(body).unwrap();
         assert!(page.contains("data-identity-mode=\"ephemeral\""));
         assert!(page.contains("Ephemeral identity"));
-        assert!(page.contains("ephemeral; enroll new keys after restart"));
+        assert!(page.contains("ephemeral; save its new keys after restart"));
     }
 
     #[test]

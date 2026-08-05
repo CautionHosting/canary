@@ -1,7 +1,7 @@
 //! Hybrid-signed statement envelope: signing and verification (spec §9, §3, §10).
 //!
 //! A statement is the signed, canonical claim that a Canary emits about one
-//! target. V0 has PCR-only and opt-in Caddy TLS-bound claim profiles. The
+//! target. V0 has PCR-only and opt-in TLS-bound claim profiles. The
 //! signed bytes are the fixed
 //! domain prefix `"caution.canary.statement.v0\0"` concatenated with the
 //! RFC 8785 canonical JSON of the payload (not the whole envelope). Both
@@ -24,7 +24,7 @@ const SIGN_PREFIX: &[u8] = b"caution.canary.statement.v0\0";
 
 /// PCR-only V0 claim type (spec §3).
 pub const CLAIM_TYPE: &str = "caution.canary.pcr-match.v0";
-pub const CADDY_CLAIM_TYPE: &str = "caution.canary.caddy-tls-bound.v0";
+pub const TLS_CLAIM_TYPE: &str = "caution.canary.tls-bound.v0";
 
 const ALG_ED25519: &str = "Ed25519";
 const ALG_ML_DSA_65: &str = "ML-DSA-65";
@@ -164,9 +164,9 @@ fn is_canonical_https_origin(value: &str) -> bool {
 }
 
 fn validate_identity_origin_and_digests(payload: &Payload) -> Result<(), StatementError> {
-    if payload.claim_type != CLAIM_TYPE && payload.claim_type != CADDY_CLAIM_TYPE {
+    if payload.claim_type != CLAIM_TYPE && payload.claim_type != TLS_CLAIM_TYPE {
         return Err(StatementError::InvalidPayload(format!(
-            "claim_type must be {CLAIM_TYPE:?} or {CADDY_CLAIM_TYPE:?}"
+            "claim_type must be {CLAIM_TYPE:?} or {TLS_CLAIM_TYPE:?}"
         )));
     }
     if payload.key_epoch != KEY_EPOCH {
@@ -253,10 +253,10 @@ fn validate_status_reason(payload: &Payload) -> Result<(), StatementError> {
         ));
     }
     if payload.reason == TLS_BINDING_MISMATCH_REASON
-        && (payload.claim_type != CADDY_CLAIM_TYPE || payload.status != Status::Failed)
+        && (payload.claim_type != TLS_CLAIM_TYPE || payload.status != Status::Failed)
     {
         return Err(StatementError::InvalidPayload(
-            "TLS_BINDING_MISMATCH requires a FAILED Caddy TLS claim".to_string(),
+            "TLS_BINDING_MISMATCH requires a FAILED TLS-bound claim".to_string(),
         ));
     }
     if payload.reason == TLS_BINDING_MISMATCH_REASON && payload.evidence_digest.is_none() {
@@ -291,17 +291,17 @@ fn validate_tls_binding(payload: &Payload) -> Result<(), StatementError> {
     }
 
     let expected_domain = dns_hostname(&payload.target_origin).ok_or_else(|| {
-        StatementError::InvalidPayload("Caddy TLS claim target_origin has no hostname".to_string())
+        StatementError::InvalidPayload("TLS-bound claim target_origin has no hostname".to_string())
     })?;
     if payload.status == Status::Verified {
         let tls = payload.tls.as_ref().ok_or_else(|| {
             StatementError::InvalidPayload(
-                "VERIFIED Caddy TLS claims require a TLS binding result".to_string(),
+                "VERIFIED TLS-bound claims require a TLS binding result".to_string(),
             )
         })?;
         if !tls.matches(&expected_domain) {
             return Err(StatementError::InvalidPayload(
-                "VERIFIED Caddy TLS claim does not bind its target domain and certificate"
+                "VERIFIED TLS-bound claim does not bind its target domain and certificate"
                     .to_string(),
             ));
         }
@@ -357,7 +357,7 @@ fn validate_payload(payload: &Payload) -> Result<(DateTime<Utc>, DateTime<Utc>),
 
 pub const fn claim_type_for_e2e_mode(mode: Option<E2eMode>) -> &'static str {
     match mode {
-        Some(E2eMode::Caddy) => CADDY_CLAIM_TYPE,
+        Some(E2eMode::Tls) => TLS_CLAIM_TYPE,
         None => CLAIM_TYPE,
     }
 }
@@ -694,11 +694,11 @@ mod tests {
     }
 
     #[test]
-    fn caddy_claim_requires_a_matching_signed_tls_result() {
+    fn tls_claim_requires_a_matching_signed_tls_result() {
         let mut payload = verified_payload();
-        payload.claim_type = CADDY_CLAIM_TYPE.to_owned();
+        payload.claim_type = TLS_CLAIM_TYPE.to_owned();
         payload.tls = Some(TlsBindingResult {
-            attested_mode: "caddy".to_owned(),
+            attested_mode: "tls".to_owned(),
             attested_domain: "payments.example.com".to_owned(),
             attested_certfp: "c".repeat(64),
             observed_certfp: "c".repeat(64),
@@ -713,13 +713,13 @@ mod tests {
     }
 
     #[test]
-    fn caddy_mismatch_can_sign_diagnostics_or_missing_metadata() {
+    fn tls_mismatch_can_sign_diagnostics_or_missing_metadata() {
         let mut payload = verified_payload();
-        payload.claim_type = CADDY_CLAIM_TYPE.to_owned();
+        payload.claim_type = TLS_CLAIM_TYPE.to_owned();
         payload.status = Status::Failed;
         payload.reason = TLS_BINDING_MISMATCH_REASON.to_owned();
         payload.tls = Some(TlsBindingResult {
-            attested_mode: "caddy".to_owned(),
+            attested_mode: "tls".to_owned(),
             attested_domain: "payments.example.com".to_owned(),
             attested_certfp: "c".repeat(64),
             observed_certfp: "d".repeat(64),
@@ -740,7 +740,7 @@ mod tests {
     fn pcr_claim_cannot_smuggle_tls_results() {
         let mut payload = verified_payload();
         payload.tls = Some(TlsBindingResult {
-            attested_mode: "caddy".to_owned(),
+            attested_mode: "tls".to_owned(),
             attested_domain: "payments.example.com".to_owned(),
             attested_certfp: "c".repeat(64),
             observed_certfp: "c".repeat(64),
@@ -749,6 +749,16 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("PCR-only"));
+    }
+
+    #[test]
+    fn legacy_caddy_claim_type_is_rejected() {
+        let mut payload = verified_payload();
+        payload.claim_type = "caution.canary.caddy-tls-bound.v0".to_owned();
+        assert!(sign_statement(payload, &test_keyset())
+            .unwrap_err()
+            .to_string()
+            .contains("claim_type must be"));
     }
 
     #[test]
@@ -824,7 +834,7 @@ mod tests {
             (
                 "claim type",
                 |payload| payload.claim_type = "not-the-v0-claim".to_string(),
-                "claim_type must be \"caution.canary.pcr-match.v0\" or \"caution.canary.caddy-tls-bound.v0\"",
+                "claim_type must be \"caution.canary.pcr-match.v0\" or \"caution.canary.tls-bound.v0\"",
             ),
             (
                 "key epoch",

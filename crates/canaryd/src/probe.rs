@@ -21,7 +21,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::network::{resolve_and_pin, PinnedTarget, Resolver};
-use canary_core::tls_binding::{evaluate_caddy_binding, TlsBindingResult};
+use canary_core::tls_binding::{evaluate_tls_binding, TlsBindingResult};
 
 /// Fixed V0 network limits. They are deliberately code constants, never live
 /// configuration (approved Phase 2 decision 4).
@@ -446,11 +446,11 @@ async fn probe_with_nonce_inner<R: Resolver, T: ProbeTransport>(
         .map(Duration::from_secs)
         .unwrap_or(Duration::ZERO);
     let verification = verify_evidence(&document, &expected_pcrs, &nonce, now);
-    let (reason, tls) = if verification.passed && target.e2e_mode == Some(E2eMode::Caddy) {
+    let (reason, tls) = if verification.passed && target.e2e_mode == Some(E2eMode::Tls) {
         let expected_domain = dns_hostname(&target.attestation_url);
         match (
             expected_domain,
-            evaluate_caddy_binding(
+            evaluate_tls_binding(
                 verification.user_data.as_deref(),
                 peer_certificate_der.as_deref(),
             ),
@@ -659,10 +659,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn caddy_profile_fails_closed_when_authenticated_metadata_is_absent() {
+    async fn tls_profile_fails_closed_when_authenticated_metadata_is_absent() {
         let resolver = FakeResolver(Ok(vec!["8.8.8.8:443".parse().unwrap()]));
         let mut target = fixture_target();
-        target.e2e_mode = Some(E2eMode::Caddy);
+        target.e2e_mode = Some(E2eMode::Tls);
         let mut response = fixture_response();
         response.peer_certificate_der = Some(b"leaf certificate DER".to_vec());
         let observation_time = Utc.timestamp_opt(FIXTURE_TIME_SECONDS, 0).single().unwrap();
@@ -683,11 +683,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn caddy_binding_is_evaluated_only_after_base_attestation_policy() {
+    async fn tls_binding_is_evaluated_only_after_base_attestation_policy() {
         let resolver = FakeResolver(Ok(vec!["8.8.8.8:443".parse().unwrap()]));
         let observation_time = Utc.timestamp_opt(FIXTURE_TIME_SECONDS, 0).single().unwrap();
         let mut target = fixture_target();
-        target.e2e_mode = Some(E2eMode::Caddy);
+        target.e2e_mode = Some(E2eMode::Tls);
         target.expected_pcrs.pcr0 = "a".repeat(96);
         let pcr_mismatch = probe_with_nonce_at(
             &resolver,

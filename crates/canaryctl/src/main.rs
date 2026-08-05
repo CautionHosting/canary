@@ -99,8 +99,8 @@ struct TargetArgs {
     /// Target Bootproof `/attestation` URL.
     #[arg(long, alias = "url")]
     attestation_url: String,
-    /// Require enclave-terminated Caddy TLS to match signed attestation metadata.
-    #[arg(long, value_parser = ["caddy"], conflicts_with = "tofu")]
+    /// Require enclave-terminated TLS to match signed attestation metadata.
+    #[arg(long, value_parser = ["tls"], conflicts_with = "tofu")]
     e2e_mode: Option<String>,
     /// Canary node ID, required only when creating a new config.
     #[arg(long)]
@@ -600,7 +600,7 @@ fn config_add(args: &TargetArgs, name: &str, pcrs_file: &Path) -> Result<String>
         e2e_mode: args
             .e2e_mode
             .as_deref()
-            .map(|_| canary_core::config::E2eMode::Caddy),
+            .map(|_| canary_core::config::E2eMode::Tls),
         expected_pcrs: pcrs,
     };
     let mut config = load_or_create_config(&args.config, args.canary_id.as_deref())?;

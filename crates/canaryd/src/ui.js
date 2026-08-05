@@ -386,25 +386,25 @@ IwLz3/Y=
     if (element) element.textContent = verificationCommand(deploymentId);
   }
 
-  function renderCaddyBinding() {
-    const panel = dialog.querySelector("[data-caddy-binding]");
-    const isCaddy = currentDeployment.profile === "caddy";
-    panel.hidden = !isCaddy;
-    if (!isCaddy) return;
+  function renderTlsBinding() {
+    const panel = dialog.querySelector("[data-tls-binding]");
+    const isTls = currentDeployment.profile === "tls";
+    panel.hidden = !isTls;
+    if (!isTls) return;
 
     const evaluated = currentDeployment.reason === "ALL_CHECKS_PASSED"
       || currentDeployment.reason === "TLS_BINDING_MISMATCH";
     panel.dataset.state = currentDeployment.status === "VERIFIED"
       ? "verified"
       : evaluated ? "failed" : "idle";
-    panel.querySelector("[data-caddy-status]").textContent = currentDeployment.status === "VERIFIED"
+    panel.querySelector("[data-tls-status]").textContent = currentDeployment.status === "VERIFIED"
       ? "BOUND"
       : evaluated ? "MISMATCH" : "NOT EVALUATED";
-    panel.querySelector("[data-caddy-mode]").textContent = currentDeployment.tlsMode || "Unavailable";
-    panel.querySelector("[data-caddy-domain]").textContent = currentDeployment.tlsDomain || "Unavailable";
-    panel.querySelector("[data-caddy-attested-certfp]").textContent = currentDeployment.tlsAttestedCertfp || "Unavailable";
-    panel.querySelector("[data-caddy-observed-certfp]").textContent = currentDeployment.tlsObservedCertfp || "Unavailable";
-    byId("caddy-certificate-command").textContent = certificateCommand(currentDeployment.origin);
+    panel.querySelector("[data-tls-mode]").textContent = currentDeployment.tlsMode || "Unavailable";
+    panel.querySelector("[data-tls-domain]").textContent = currentDeployment.tlsDomain || "Unavailable";
+    panel.querySelector("[data-tls-attested-certfp]").textContent = currentDeployment.tlsAttestedCertfp || "Unavailable";
+    panel.querySelector("[data-tls-observed-certfp]").textContent = currentDeployment.tlsObservedCertfp || "Unavailable";
+    byId("tls-certificate-command").textContent = certificateCommand(currentDeployment.origin);
   }
 
   function setActiveTab(name) {
@@ -735,7 +735,7 @@ IwLz3/Y=
     byId("inspector-observed").textContent = currentDeployment.observed;
     byId("inspector-expires").textContent = currentDeployment.expires;
     byId("inspector-warning").textContent = currentDeployment.warning;
-    renderCaddyBinding();
+    renderTlsBinding();
     setCommand(byId("deployment-command"), currentDeployment.id);
     setLink("statement-json-link", "statement");
     setLink("evidence-json-link", "evidence");

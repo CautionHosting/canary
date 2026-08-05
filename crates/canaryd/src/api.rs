@@ -649,7 +649,7 @@ mod tests {
         evidence::{AuthenticatedPcrClaims, EvidenceBundle, PcrMatches, PcrValues},
         keys::{KeyEntry, KeysDocument},
         node::ConfigDocument,
-        statement::{Payload, Signature, Signer, Statement, Status, CADDY_CLAIM_TYPE},
+        statement::{Payload, Signature, Signer, Statement, Status, TLS_CLAIM_TYPE},
         tls_binding::TlsBindingResult,
     };
     use chrono::{Duration, TimeZone, Utc};
@@ -958,21 +958,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn caddy_target_is_tagged_and_exposes_its_signed_certificate_comparison() {
-        let mut caddy = target(Some(evidence()));
-        caddy.target_origin = "https://caddy-poc.kobl.one".to_owned();
-        caddy.statement.payload.target_origin = caddy.target_origin.clone();
-        caddy.statement.payload.claim_type = CADDY_CLAIM_TYPE.to_owned();
-        caddy.statement.payload.tls = Some(TlsBindingResult {
-            attested_mode: "caddy".to_owned(),
+    async fn tls_target_is_tagged_and_exposes_its_signed_certificate_comparison() {
+        let mut tls_target = target(Some(evidence()));
+        tls_target.target_origin = "https://caddy-poc.kobl.one".to_owned();
+        tls_target.statement.payload.target_origin = tls_target.target_origin.clone();
+        tls_target.statement.payload.claim_type = TLS_CLAIM_TYPE.to_owned();
+        tls_target.statement.payload.tls = Some(TlsBindingResult {
+            attested_mode: "tls".to_owned(),
             attested_domain: "caddy-poc.kobl.one".to_owned(),
             attested_certfp: "a".repeat(64),
             observed_certfp: "b".repeat(64),
         });
-        let page = crate::html::render_status_page(&snapshot(caddy));
+        let page = crate::html::render_status_page(&snapshot(tls_target));
 
-        assert!(page.contains("data-target-profile=\"caddy\""));
-        assert!(page.contains("E2E · CADDY"));
+        assert!(page.contains("data-target-profile=\"tls\""));
+        assert!(page.contains("E2E · TLS"));
         assert!(page.contains("data-tls-attested-certfp=\"aaaaaaaa"));
         assert!(page.contains("data-tls-observed-certfp=\"bbbbbbbb"));
         assert!(page.contains("Observed TLS cert SHA-256"));

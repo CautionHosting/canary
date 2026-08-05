@@ -8,7 +8,7 @@
       "id": "caddy-poc",
       "name": "Caddy POC",
       "attestation_url": "https://caddy-poc.kobl.one/attestation",
-      "e2e_mode": "caddy",
+      "e2e_mode": "tls",
       "expected_pcrs": {
         "0": "5362895473c431a5be93b6bdcaa189aa1497a841bec86a72038f8867654b11a5cfea673739da3548a305f56e0977d62d",
         "1": "5362895473c431a5be93b6bdcaa189aa1497a841bec86a72038f8867654b11a5cfea673739da3548a305f56e0977d62d",

@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use canary_core::{
     config::Target,
     evidence::AuthenticatedPcrClaims,
-    statement::{Status, CADDY_CLAIM_TYPE},
+    statement::{Status, TLS_CLAIM_TYPE},
     tls_binding::TLS_BINDING_MISMATCH_REASON,
 };
 use serde_json::{json, Value};
@@ -46,7 +46,7 @@ impl VerificationOutcome {
             let detail = if deployment.status_text() == "VERIFIED" {
                 match deployment {
                     DeploymentResult::Verified(result)
-                        if result.statement.payload.claim_type == CADDY_CLAIM_TYPE =>
+                        if result.statement.payload.claim_type == TLS_CLAIM_TYPE =>
                     {
                         "PCR0/1/2 + TLS binding + signatures"
                     }
@@ -280,7 +280,7 @@ fn write_concise_pcrs(output: &mut String, claims: Option<&AuthenticatedPcrClaim
 }
 
 fn write_concise_tls(output: &mut String, statement: &canary_core::statement::Statement) {
-    if statement.payload.claim_type != CADDY_CLAIM_TYPE {
+    if statement.payload.claim_type != TLS_CLAIM_TYPE {
         return;
     }
     let Some(tls) = statement.payload.tls.as_ref() else {
@@ -299,8 +299,7 @@ fn write_concise_tls(output: &mut String, statement: &canary_core::statement::St
     let matched = statement.payload.status == Status::Verified;
     write!(
         output,
-        "\n  TLS {} {} {}",
-        tls.attested_mode,
+        "\n  TLS {} {}",
         tls.attested_domain,
         if matched { "PASS" } else { "MISMATCH" }
     )
@@ -336,7 +335,7 @@ fn write_verbose_pcrs(output: &mut String, claims: Option<&AuthenticatedPcrClaim
 }
 
 fn write_tls_binding(output: &mut String, statement: &canary_core::statement::Statement) {
-    if statement.payload.claim_type != CADDY_CLAIM_TYPE {
+    if statement.payload.claim_type != TLS_CLAIM_TYPE {
         return;
     }
     if statement.payload.reason != "ALL_CHECKS_PASSED"

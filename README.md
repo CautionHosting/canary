@@ -7,8 +7,8 @@ ML-DSA-65.
 
 `canaryctl` independently verifies the Canary trust input, both signatures, and the
 linked Nitro evidence. A `VERIFIED` target means its most recent fresh evidence
-matched its configured PCR0/1/2. Targets configured with `"e2e_mode": "caddy"` also bind
-the attested Caddy certificate fingerprint to the leaf certificate from that exact
+matched its configured PCR0/1/2. Targets configured with `"e2e_mode": "tls"` also bind
+the attested certificate fingerprint to the leaf certificate from that exact
 `/attestation` TLS response. It does not prove application correctness or coverage
 of replicas that are not configured separately.
 
@@ -50,7 +50,7 @@ canaryctl add-target \
 `--canary-id` is required only when creating `canary.json`. Add each further target
 with a unique ID; use `--replace` to change an existing one.
 
-For an enclave-terminated Caddy target, add the opt-in binding profile:
+For enclave-terminated TLS (for example, Caddy), add the opt-in binding profile:
 
 ```sh
 canaryctl add-target \
@@ -58,12 +58,12 @@ canaryctl add-target \
   --canary-id company-canary \
   --id payments-prod \
   --attestation-url https://payments.example.com/attestation \
-  --e2e-mode caddy \
+  --e2e-mode tls \
   --expected-pcrs .caution/trusted_hashes.json
 ```
 
 This profile requires independently supplied PCR0/1/2; it cannot be combined with
-TOFU. Missing, malformed, or unequal authenticated Caddy metadata produces an
+TOFU. Missing, malformed, or unequal authenticated TLS metadata produces an
 immediate signed `FAILED / TLS_BINDING_MISMATCH`. The next successful scheduled probe
 restores `VERIFIED`; there is no renewal grace period.
 
@@ -203,7 +203,7 @@ overwrites it. Select specific targets with repeated `--target payments-prod`.
 Successful verification displays authenticated observed PCR0/1/2 in the normal
 output. `--verbose` displays full observed and expected values; `--json` provides the
 same values and match booleans under `pcrs`. Results without authenticated evidence
-emit `pcrs: null`. Caddy-profile results additionally expose the signed `tls`
+emit `pcrs: null`. TLS-profile results additionally expose the signed `tls`
 comparison. `canaryctl verify` independently replays Nitro evidence and expected-PCR
 policy before accepting either the successful binding or a binding mismatch.
 
@@ -325,7 +325,7 @@ cargo test --locked -p canaryd --test caddy_nitro_live -- --ignored --nocapture
   chain remains AWS-rooted and classical.
 - Target names, URLs, PCRs, keys, statements, evidence, and metadata are public.
 - History is enclave/container-local and is not a durable audit log.
-- Caddy mode binds only the exact attestation HTTPS connection it observed. It does
+- TLS mode binds only the exact attestation HTTPS connection it observed. It does
   not discover replicas or prove application correctness.
 - Multiple network vantage points require separate Canary deployments with the same
   target policy. Traffic quarantine remains an external action driven by the signed

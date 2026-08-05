@@ -132,8 +132,8 @@ fn add_target_refuses_silent_replacement_and_allows_explicit_replace() {
 }
 
 #[test]
-fn add_target_accepts_only_caddy_with_independently_supplied_pcrs() {
-    let dir = TempDir::new("caddy-config");
+fn add_target_accepts_only_tls_with_independently_supplied_pcrs() {
+    let dir = TempDir::new("tls-config");
     let config = dir.join("canary.json");
     let pcrs = dir.join("trusted_hashes.json");
     write_trusted_pcrs(&pcrs);
@@ -149,7 +149,7 @@ fn add_target_accepts_only_caddy_with_independently_supplied_pcrs() {
         "--attestation-url",
         "https://payments.example.com/attestation",
         "--e2e-mode",
-        "caddy",
+        "tls",
         "--expected-pcrs",
         path_arg(&pcrs),
     ]);
@@ -160,7 +160,7 @@ fn add_target_accepts_only_caddy_with_independently_supplied_pcrs() {
     );
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
-    assert_eq!(saved["targets"][0]["e2e_mode"], "caddy");
+    assert_eq!(saved["targets"][0]["e2e_mode"], "tls");
 
     let unknown = run(&[
         "add-target",
@@ -169,7 +169,7 @@ fn add_target_accepts_only_caddy_with_independently_supplied_pcrs() {
         "--attestation-url",
         "https://other.example.com/attestation",
         "--e2e-mode",
-        "steve",
+        "caddy",
         "--expected-pcrs",
         path_arg(&pcrs),
     ]);
@@ -182,7 +182,7 @@ fn add_target_accepts_only_caddy_with_independently_supplied_pcrs() {
         "--attestation-url",
         "https://other.example.com/attestation",
         "--e2e-mode",
-        "caddy",
+        "tls",
         "--tofu",
         "--accept-tofu",
     ]);

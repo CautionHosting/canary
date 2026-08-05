@@ -401,7 +401,7 @@ mod tests {
         let mut reducer = TargetReducer::new();
         reducer.apply_definitive(valid());
         let tls = TlsBindingResult {
-            attested_mode: "caddy".to_owned(),
+            attested_mode: "tls".to_owned(),
             attested_domain: "app.example.com".to_owned(),
             attested_certfp: "a".repeat(64),
             observed_certfp: "b".repeat(64),

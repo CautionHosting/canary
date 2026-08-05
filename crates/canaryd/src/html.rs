@@ -4,7 +4,7 @@
 //! fetches read-only artifacts and performs an explicit, nonce-bound
 //! browser-side verification of Canary's own Nitro attestation when available.
 
-use canary_core::{node::IdentityMode, statement::CADDY_CLAIM_TYPE};
+use canary_core::{node::IdentityMode, statement::TLS_CLAIM_TYPE};
 
 use crate::model::{ExecutionEnvironment, RuntimeSnapshot};
 
@@ -294,15 +294,15 @@ const INSPECTOR: &str = r##"</main>
           </tbody>
         </table>
       </section>
-      <section class="pcr-panel" data-caddy-binding data-state="idle" hidden>
-        <div class="pcr-panel-head"><div><h3>Caddy TLS certificate binding</h3><p>The signed attestation metadata is compared with the leaf certificate from the same HTTPS response.</p></div><span class="pcr-panel-status" data-caddy-status></span></div>
+      <section class="pcr-panel" data-tls-binding data-state="idle" hidden>
+        <div class="pcr-panel-head"><div><h3>TLS certificate binding</h3><p>The signed attestation metadata is compared with the leaf certificate from the same HTTPS response.</p></div><span class="pcr-panel-status" data-tls-status></span></div>
         <dl class="inspector-details">
-          <div class="detail"><dt>Attested mode</dt><dd><code data-caddy-mode></code></dd></div>
-          <div class="detail"><dt>Attested domain</dt><dd><code data-caddy-domain></code></dd></div>
-          <div class="detail detail--wide"><dt>Attested certificate SHA-256</dt><dd><code data-caddy-attested-certfp></code></dd></div>
-          <div class="detail detail--wide"><dt>Observed certificate SHA-256</dt><dd><code data-caddy-observed-certfp></code></dd></div>
+          <div class="detail"><dt>Attested mode</dt><dd><code data-tls-mode></code></dd></div>
+          <div class="detail"><dt>Attested domain</dt><dd><code data-tls-domain></code></dd></div>
+          <div class="detail detail--wide"><dt>Attested certificate SHA-256</dt><dd><code data-tls-attested-certfp></code></dd></div>
+          <div class="detail detail--wide"><dt>Observed certificate SHA-256</dt><dd><code data-tls-observed-certfp></code></dd></div>
         </dl>
-        <div class="panel-verify"><h3>Check the current HTTPS certificate</h3><div class="command-row"><pre id="caddy-certificate-command"></pre><button class="copy-button" type="button" data-copy="#caddy-certificate-command">Copy</button></div></div>
+        <div class="panel-verify"><h3>Check the current HTTPS certificate</h3><div class="command-row"><pre id="tls-certificate-command"></pre><button class="copy-button" type="button" data-copy="#tls-certificate-command">Copy</button></div></div>
       </section>
       <div class="panel-verify deployment-command-box"><h3>Verify this target locally</h3><div class="command-row"><pre id="deployment-command"></pre><button class="copy-button" type="button" data-copy="#deployment-command">Copy</button></div></div>
       <div class="panel-links"><a class="raw-link" id="statement-json-link" href="#">Statement JSON</a><a class="raw-link" id="evidence-json-link" href="#">Raw evidence JSON</a><a class="raw-link" id="evidence-claims-json-link" href="#">Decoded claims JSON</a></div>
@@ -335,7 +335,7 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
     page.push_str("</span></div><div class=\"targets\">");
 
     for target in &snapshot.targets {
-        let is_caddy = target.statement.payload.claim_type == CADDY_CLAIM_TYPE;
+        let is_tls = target.statement.payload.claim_type == TLS_CLAIM_TYPE;
         let tls = target.statement.payload.tls.as_ref();
         page.push_str("<article class=\"target-card ");
         page.push_str(status_class(target.status));
@@ -359,8 +359,8 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
         if let Some(warning) = &target.transport_warning {
             push_escaped(&mut page, warning);
         }
-        if is_caddy {
-            page.push_str("\" data-target-profile=\"caddy\" data-tls-mode=\"");
+        if is_tls {
+            page.push_str("\" data-target-profile=\"tls\" data-tls-mode=\"");
             if let Some(tls) = tls {
                 push_escaped(&mut page, &tls.attested_mode);
             }
@@ -382,8 +382,8 @@ pub fn render_status_page(snapshot: &RuntimeSnapshot) -> String {
         page.push_str("</span><h3>");
         push_escaped(&mut page, &target.name);
         page.push_str("</h3></div><div class=\"header-actions\">");
-        if is_caddy {
-            page.push_str("<span class=\"profile-badge\">E2E · CADDY</span>");
+        if is_tls {
+            page.push_str("<span class=\"profile-badge\">E2E · TLS</span>");
         }
         page.push_str("<span class=\"status-badge ");
         page.push_str(status_class(target.status));

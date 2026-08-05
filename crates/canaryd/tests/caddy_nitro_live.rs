@@ -32,7 +32,7 @@ async fn live_caddy_attestation_is_bound_to_its_response_leaf() {
         id: "caddy-live".to_owned(),
         name: "Caddy live Nitro acceptance".to_owned(),
         attestation_url: attestation_url.clone(),
-        e2e_mode: Some(E2eMode::Caddy),
+        e2e_mode: Some(E2eMode::Tls),
         expected_pcrs: ExpectedPcrs {
             pcr0: trusted.pcr0,
             pcr1: trusted.pcr1,
@@ -54,6 +54,6 @@ async fn live_caddy_attestation_is_bound_to_its_response_leaf() {
     assert!(claims.matches.pcr0 && claims.matches.pcr1 && claims.matches.pcr2);
     let tls = attempt
         .tls
-        .expect("passing Caddy profile retains its TLS comparison");
+        .expect("passing TLS profile retains its TLS comparison");
     assert!(tls.matches(&expected_domain));
 }

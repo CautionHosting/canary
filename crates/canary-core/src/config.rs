@@ -63,7 +63,7 @@ pub struct Target {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum E2eMode {
-    Caddy,
+    Tls,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -122,8 +122,8 @@ pub enum ConfigError {
     UrlHasFragment { target_id: String },
     #[error("target {target_id:?} attestation_url must use https")]
     NotHttps { target_id: String },
-    #[error("target {target_id:?} with e2e_mode=caddy requires a DNS hostname")]
-    CaddyRequiresDomain { target_id: String },
+    #[error("target {target_id:?} with e2e_mode=tls requires a DNS hostname")]
+    TlsRequiresDomain { target_id: String },
     #[error("target {target_id:?} PCR{pcr} has wrong length {len}, expected {PCR_HEX_LEN}")]
     BadPcrLength {
         target_id: String,
@@ -236,10 +236,10 @@ impl Config {
             }
 
             validate_attestation_url(&target.id, &target.attestation_url)?;
-            if target.e2e_mode == Some(E2eMode::Caddy)
+            if target.e2e_mode == Some(E2eMode::Tls)
                 && dns_hostname(&target.attestation_url).is_none()
             {
-                return Err(ConfigError::CaddyRequiresDomain {
+                return Err(ConfigError::TlsRequiresDomain {
                     target_id: target.id.clone(),
                 });
             }
@@ -312,14 +312,14 @@ mod tests {
     }
 
     #[test]
-    fn caddy_mode_is_additive_and_requires_a_dns_hostname() {
+    fn tls_mode_is_additive_and_requires_a_dns_hostname() {
         let mut json = valid_config_json();
-        json["targets"][0]["e2e_mode"] = serde_json::json!("caddy");
+        json["targets"][0]["e2e_mode"] = serde_json::json!("tls");
         let config = parse_and_validate(&json.to_string()).unwrap();
-        assert_eq!(config.targets[0].e2e_mode, Some(E2eMode::Caddy));
+        assert_eq!(config.targets[0].e2e_mode, Some(E2eMode::Tls));
         assert_eq!(
             serde_json::to_value(&config).unwrap()["targets"][0]["e2e_mode"],
-            "caddy"
+            "tls"
         );
 
         json["targets"][0]["attestation_url"] =
@@ -327,7 +327,7 @@ mod tests {
         let config: Config = serde_json::from_value(json).unwrap();
         assert_eq!(
             config.validate().unwrap_err(),
-            ConfigError::CaddyRequiresDomain {
+            ConfigError::TlsRequiresDomain {
                 target_id: "payments-prod".to_owned()
             }
         );
@@ -337,6 +337,14 @@ mod tests {
     fn unknown_e2e_mode_is_rejected() {
         let mut json = valid_config_json();
         json["targets"][0]["e2e_mode"] = serde_json::json!("steve");
+        let error = serde_json::from_value::<Config>(json).unwrap_err();
+        assert!(error.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn legacy_caddy_e2e_mode_is_rejected() {
+        let mut json = valid_config_json();
+        json["targets"][0]["e2e_mode"] = serde_json::json!("caddy");
         let error = serde_json::from_value::<Config>(json).unwrap_err();
         assert!(error.to_string().contains("unknown variant"));
     }

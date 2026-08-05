@@ -471,10 +471,10 @@ fn verify_target_artifacts(
             if outcome.evidence_digest != expected_digest {
                 bail!("verified evidence digest does not match signed statement");
             }
-            let caddy_tls_mismatch = target.e2e_mode == Some(E2eMode::Caddy)
+            let tls_mismatch = target.e2e_mode == Some(E2eMode::Tls)
                 && outcome.passed
                 && payload.reason == TLS_BINDING_MISMATCH_REASON;
-            if outcome.reason.as_str() != payload.reason && !caddy_tls_mismatch {
+            if outcome.reason.as_str() != payload.reason && !tls_mismatch {
                 bail!(
                     "evidence result {} does not match signed reason {}",
                     outcome.reason.as_str(),
@@ -838,9 +838,9 @@ mod tests {
     }
 
     #[test]
-    fn caddy_claim_replays_nitro_policy_and_validates_signed_tls_comparison() {
+    fn tls_claim_replays_nitro_policy_and_validates_signed_tls_comparison() {
         let matching_tls = TlsBindingResult {
-            attested_mode: "caddy".to_owned(),
+            attested_mode: "tls".to_owned(),
             attested_domain: "payments.example.com".to_owned(),
             attested_certfp: "a".repeat(64),
             observed_certfp: "a".repeat(64),
@@ -849,7 +849,7 @@ mod tests {
             Status::Verified,
             "ALL_CHECKS_PASSED",
             PCR_0_AND_1,
-            Some(E2eMode::Caddy),
+            Some(E2eMode::Tls),
             Some(matching_tls.clone()),
         );
         let report = verify_target_artifacts(
@@ -869,20 +869,20 @@ mod tests {
             .contains("PCR0/1/2 + TLS binding + signatures"));
         assert!(outcome
             .concise_text()
-            .contains("TLS caddy payments.example.com PASS"));
+            .contains("TLS payments.example.com PASS"));
         assert!(outcome
             .concise_text()
             .contains(&format!("cert sha256:{}", "a".repeat(64))));
         assert_eq!(
             outcome.json_result()["deployments"][0]["tls"]["attested_mode"],
-            "caddy"
+            "tls"
         );
     }
 
     #[test]
-    fn caddy_tls_mismatch_is_an_authenticated_negative_after_nitro_passes() {
+    fn tls_mismatch_is_an_authenticated_negative_after_nitro_passes() {
         let mismatched_tls = TlsBindingResult {
-            attested_mode: "caddy".to_owned(),
+            attested_mode: "tls".to_owned(),
             attested_domain: "payments.example.com".to_owned(),
             attested_certfp: "a".repeat(64),
             observed_certfp: "b".repeat(64),
@@ -891,7 +891,7 @@ mod tests {
             Status::Failed,
             TLS_BINDING_MISMATCH_REASON,
             PCR_0_AND_1,
-            Some(E2eMode::Caddy),
+            Some(E2eMode::Tls),
             Some(mismatched_tls.clone()),
         );
         let report = verify_target_artifacts(
@@ -908,19 +908,19 @@ mod tests {
         assert_eq!(report.statement.payload.tls, Some(mismatched_tls));
         assert!(report.pcr_claims.is_some());
         let output = outcome_for(report, "ATTESTED", "stable").concise_text();
-        assert!(output.contains("TLS caddy payments.example.com MISMATCH"));
+        assert!(output.contains("TLS payments.example.com MISMATCH"));
         assert!(output.contains(&format!("attested sha256:{}", "a".repeat(64))));
         assert!(output.contains(&format!("observed sha256:{}", "b".repeat(64))));
     }
 
     #[test]
-    fn caddy_base_attestation_failure_does_not_claim_tls_was_compared() {
+    fn tls_base_attestation_failure_does_not_claim_tls_was_compared() {
         let wrong_pcr = format!("{}0", &PCR_0_AND_1[..PCR_0_AND_1.len() - 1]);
         let (config, keys, statement, evidence, now) = fixture_with_profile(
             Status::Failed,
             "PCR_MISMATCH",
             &wrong_pcr,
-            Some(E2eMode::Caddy),
+            Some(E2eMode::Tls),
             None,
         );
         let report = verify_target_artifacts(
@@ -940,10 +940,10 @@ mod tests {
     }
 
     #[test]
-    fn configured_caddy_profile_rejects_a_pcr_only_claim() {
+    fn configured_tls_profile_rejects_a_pcr_only_claim() {
         let (mut config, keys, statement, evidence, now) =
             fixture(Status::Verified, "ALL_CHECKS_PASSED", PCR_0_AND_1);
-        config.config.targets[0].e2e_mode = Some(E2eMode::Caddy);
+        config.config.targets[0].e2e_mode = Some(E2eMode::Tls);
         let error = verify_target_artifacts(
             &config,
             &keys,

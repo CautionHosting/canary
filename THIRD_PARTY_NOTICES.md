@@ -3,8 +3,8 @@
 The browser-side Nitro verifier in `crates/canaryd/src/ui.js` adapts code from
 `attestation-widget` and its `tee-attestation-js` dependency:
 
-- https://git.distrust.co/public/attestation-widget
-- https://git.distrust.co/public/tee-attestation-js
+- https://codeberg.org/caution/attestation-widget
+- https://codeberg.org/caution/tee-attestation-js
 
 Copyright (c) 2025 Distrust LLC
 

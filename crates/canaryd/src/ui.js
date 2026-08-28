@@ -3,7 +3,7 @@
 
   // Portions below are adapted from attestation-widget and tee-attestation-js.
   // Copyright (c) 2025 Distrust LLC. Licensed under the MIT License:
-  // https://git.distrust.co/public/attestation-widget
+  // https://codeberg.org/caution/attestation-widget
   // CBOR/COSE and Nitro certificate verification run locally with WebCrypto.
   // This is deliberately separate from canaryctl's independently supplied
   // expected-PCR policy verification.

@@ -238,7 +238,7 @@ dependencies = [
 [[package]]
 name = "bootproof-sdk"
 version = "0.1.0"
-source = "git+https://git.distrust.co/public/bootproof?rev=78f531a2c245404a9d8879fb71cc397096ae0077#78f531a2c245404a9d8879fb71cc397096ae0077"
+source = "git+https://codeberg.org/caution/bootproof.git?rev=78f531a2c245404a9d8879fb71cc397096ae0077#78f531a2c245404a9d8879fb71cc397096ae0077"
 dependencies = [
  "coset",
  "ring",

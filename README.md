@@ -1,4 +1,4 @@
-This repository may be mirrored on other Git forges. The [canonical repository](https://git.caution.co/public/canary) is hosted on git.caution.co.
+This repository may be mirrored on other Git forges. The [canonical repository](https://git.caution.co/public/canary) is hosted on [git.caution.co](https://git.caution.co/public).
 
 # Caution Canary
 

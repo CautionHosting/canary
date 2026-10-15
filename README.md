@@ -1,3 +1,5 @@
+This repository may be mirrored on other Git forges. The [canonical repository](https://git.caution.co/public/canary) is hosted on git.caution.co.
+
 # Caution Canary
 
 Canary continuously checks public Caution/Bootproof attestation endpoints. For each

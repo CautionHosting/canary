@@ -17,20 +17,20 @@ bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "b34
 
 # Crypto
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-fips204 = "0.4"
-hkdf = "0.12"
-hmac = "0.12"
-sha2 = "0.10"
-rand = "0.8"
+fips204 = "0.5"
+hkdf = "0.13"
+hmac = "0.13"
+sha2 = "0.11"
+rand = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 
 # Serialization / canonicalization
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-serde_jcs = "0.1"
+serde_jcs = "0.2"
 serde_cbor = "0.11"
 coset = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 
 # CLI / HTTP (canaryctl)
@@ -47,8 +47,8 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "sync", "signal", "fs", "test-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 axum = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "chrono", "json"] }
 async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
